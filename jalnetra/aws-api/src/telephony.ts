@@ -1,7 +1,9 @@
 export type AlertChannel = "call" | "sms";
 export type TelephonyProvider = "omnidimension" | "twilio" | "not_configured";
 
-export type DispatchOptions = { timeoutMs?: number };
+export type DispatchOptions = { timeoutMs?: number; /** Use this OmniDimension agent instead of the default one. */ agentId?: string };
+/** incident id -> provider request id of the latest dispatch (lets the local server follow a call's outcome). */
+export const dispatchRefs = new Map<string, string>();
 type Target = { id: string | null; name: string; phone: string };
 type AlertContext = { place?: string; title?: string; source?: string; observed?: string; safe_place?: string };
 
@@ -17,6 +19,8 @@ export function telephonyConfig() {
   return {
     omnidimKey: env("OMNIDIM_KEY", "OMNIDIM_API_KEY"),
     omnidimAgent: env("OMNIDIM_AGENT", "OMNIDIM_AGENT_ID"),
+    /** Two-way agent that asks the Sarpanch to confirm or reject (stage 1 of the escalation). */
+    sarpanchAgent: env("OMNIDIM_SARPANCH_AGENT", "OMNIDIM_SARPANCH_AGENT_ID"),
     omnidimFrom: env("OMNIDIM_FROM", "OMNIDIM_FROM_NUMBER_ID"),
     twilioSid: env("TWILIO_SID", "TWILIO_ACCOUNT_SID"),
     twilioToken: env("TWILIO_TOKEN", "TWILIO_AUTH_TOKEN"),
@@ -70,7 +74,7 @@ export async function dispatchAlert(
         ...signal,
         headers: { Authorization: `Bearer ${config.omnidimKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          agent_id: Number(config.omnidimAgent),
+          agent_id: Number(options.agentId ?? config.omnidimAgent),
           to_number: target.phone,
           ...(config.omnidimFrom ? { from_number_id: Number(config.omnidimFrom) } : {}),
           call_context: {
@@ -85,7 +89,10 @@ export async function dispatchAlert(
         }),
       });
       const payload = await response.json().catch(() => ({})) as { success?: boolean; requestId?: string; message?: string; error?: string };
-      if (response.ok && payload.success !== false) return { status: "sent", providerRef: String(payload.requestId ?? ""), error: null };
+      if (response.ok && payload.success !== false) {
+        if (payload.requestId !== undefined) dispatchRefs.set(incidentId, String(payload.requestId));
+        return { status: "sent", providerRef: String(payload.requestId ?? ""), error: null };
+      }
       return { status: failedStatus(response.status), providerRef: null, error: payload.message ?? payload.error ?? `OmniDimension error ${response.status}` };
     }
 

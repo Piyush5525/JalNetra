@@ -31,3 +31,13 @@ export function englishAlert(name: string, r: VillageRisk, route: Route | null, 
   const go = route ? `Safe place: ${route.shelter.n}, about ${route.km.toFixed(1)} kilometres away. ${route.ok ? 'The suggested route does not cross the river and avoids flooded ground.' : 'Every route may be flooded, so leave now, before the water arrives.'}` : 'Move to the nearest high and safe ground.'
   return `${simulated ? 'This is an exercise message. ' : ''}Hello. This is a JalNetra flood warning. Our forecast says Gandak river water may reach ${name} ${when}. Risk level: ${r.level.toLowerCase()}. ${go} Please move children, elderly people and pregnant women first, and inform the panchayat.`
 }
+
+/** Stage-2 message for a citizen inside the evacuation zone: one short, urgent line in Hindi, then English. */
+export function citizenAlert(_name: string, _district: string | undefined, hours: number | null, shelter: string | null, _km: number | null, exercise: boolean) {
+  const whenHi = hours === null ? 'जल्द ही' : hours === 0 ? 'अभी' : `लगभग ${hours} घंटे में`
+  const whenEn = hours === null ? 'soon' : hours === 0 ? 'right now' : `in about ${hours} hours`
+  return {
+    hi: `बाढ़ का खतरा! आपके क्षेत्र में बाढ़ आ रही है और ${whenHi} पहुँचेगी। कृपया तुरंत ${shelter ?? 'नज़दीकी सुरक्षित ऊँची जगह'} पर पहुँचें।${exercise ? ' यह अभ्यास है।' : ''}`,
+    en: `Flood alert! Flood is coming to your area and will arrive ${whenEn}. Please reach ${shelter ?? 'the nearest safe high ground'} immediately.${exercise ? ' This is an exercise.' : ''}`,
+  }
+}

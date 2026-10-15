@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import DeckGL from '@deck.gl/react'
 import { FlyToInterpolator, WebMercatorViewport, type MapViewState, type PickingInfo } from '@deck.gl/core'
-import { BitmapLayer, GeoJsonLayer, PathLayer, ScatterplotLayer, TextLayer } from '@deck.gl/layers'
+import { BitmapLayer, GeoJsonLayer, IconLayer, PathLayer, PolygonLayer, ScatterplotLayer, TextLayer } from '@deck.gl/layers'
 import { PathStyleExtension } from '@deck.gl/extensions'
 import { TileLayer } from '@deck.gl/geo-layers'
 import gsap from 'gsap'
@@ -17,8 +17,8 @@ import { liveInputs } from '../engine/sources'
 import { bounds, extentAt, loadTerrain, type Extent, type Terrain } from '../engine/terrain'
 import { buildGraph, evacuate, impactStats, type Route } from '../engine/route'
 import { approveIncident, createIncident, hasKey, listRuns, type RunSummary, listAlerts, listContacts, saveKey, sendAlerts, setStatus, type Alert, type Contact, type Incident } from '../ops'
-import { FONT, HLABEL, LEVEL_RGB, M, VBY, VILLAGES, fmtIST, fmtQ, englishAlert, hindiAlert, impactText, windowText } from './shared'
-import { VILLAGES as EXERCISE_IDS, DemoApiError, approveAlert, createSession, getSession } from '../demo/api'
+import { FONT, HLABEL, LEVEL_RGB, M, VBY, VILLAGES, citizenAlert, fmtIST, fmtQ, englishAlert, hindiAlert, impactText, windowText } from './shared'
+import { VILLAGES as EXERCISE_IDS, DemoApiError, approveAlert, createSession, getEscalation, getSession, type EscalationView } from '../demo/api'
 import { approvalKey, readAttempt, writeAttempt } from '../demo/workflowState'
 import type { DemoAlert, DemoSession, Horizon } from '../demo/types'
 import { AppBrand } from '../components/AppBrand'
@@ -30,19 +30,26 @@ import { floodTile, useSentinel } from './sentinel'
 import { draftAdvisory, hindiRouteLine, walkingRoute, type Draft, type Walk } from './aws'
 import { encodeRoute, mapsLink, publicBase, shareText, shortRouteLink, simplify, type SharedRoute } from './routeShare'
 import type { PointStatus, RiverPoint, Status } from '../engine/india'
-import { SPREAD_CLOCK, SPREAD_RADIUS_KM, REACH_KM, buildTownSpread, townFacts, townImage, type TownFacts } from '../floodSpread/townSpread'
+import { SPREAD_CLOCK, REACH_HALF_KM, buildTownSpread, townFacts, townImage, type TownFacts } from '../floodSpread/townSpread'
+import { EVAC_BUFFER_CELLS, placePhones, townZone } from '../floodSpread/zone'
+import { FALLBACK_DENSITY_PER_KM2, PHONES_PER_PERSON, zonePopulation } from '../floodSpread/population'
 
 type Mode = 'live' | 'demo'
-type AlertState = { stage: 'review' | 'approving' | 'calling' | 'contacted' | 'evacuating' | 'resolved' | 'dismissed' | 'error'; incident?: Incident; approved?: boolean; error?: string; telephony?: string }
+type AlertState = { stage: 'review' | 'approving' | 'calling' | 'contacted' | 'evacuating' | 'resolved' | 'dismissed' | 'error'; incident?: Incident; approved?: boolean; error?: string; telephony?: string; esc?: { sessionId: string; alertId: string } }
 const OBS_IMG: Record<string, string> = { o1, o2, o3 }
 const DEMO_START = Date.parse('2026-09-25T06:00:00Z'), DEMO_END = Date.parse('2026-10-01T00:00:00Z'), STEP_H = 3
-const LIVE_EVERY = 15 * 60e3
+const LIVE_EVERY = 15 * 60e3, RETRY_EVERY = 2 * 60e3
 // The live map opens on all of India; selecting a river point or an alert flies in to it.
 const INITIAL: MapViewState = { longitude: 82.5, latitude: 22.8, zoom: 4.4, pitch: 0, bearing: 0, minZoom: 3.5, maxZoom: 14 }
 const INDIA_RGB: Record<Status, [number, number, number]> = { NORMAL: [110, 124, 116], RISING: [43, 108, 176], WARNING: [217, 138, 24], DANGER: [196, 48, 43] }
 const INDIA_WORD: Record<Status, string> = { NORMAL: 'Normal', RISING: 'Rising fast', WARNING: 'High', DANGER: 'Above 2025 peak' }
 const STAGES = ['Live data', 'Trend analysis', 'Water-level forecast', 'Flood extent', 'Village impact', 'Evacuation routes', 'Risk score', 'Operator approval', 'AI voice alert', 'Incident tracking']
 const ROUTE_EXTENSIONS = [new PathStyleExtension({ dash: true })]
+// Phone icons for the evacuation zone: a handset with a red alert screen, and the same handset with a green tick once notified.
+const phoneSvg = (screen: string, glyph: string) => 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="64" viewBox="0 0 40 64"><rect x="3" y="2" width="34" height="60" rx="7" fill="#111827" stroke="#fff" stroke-width="2.5"/><rect x="7" y="9" width="26" height="42" rx="3" fill="${screen}"/><rect x="15" y="4.5" width="10" height="2" rx="1" fill="#6b7280"/><circle cx="20" cy="56.5" r="2.4" fill="#6b7280"/>${glyph}</svg>`)
+const PHONE_ALERT = { url: phoneSvg('#ef4444', '<path d="M20 16v17" stroke="#fff" stroke-width="4.5" stroke-linecap="round"/><circle cx="20" cy="42" r="2.8" fill="#fff"/>'), width: 40, height: 64, anchorY: 32 }
+const PHONE_OK = { url: phoneSvg('#22c55e', '<path d="M12 31l6 6 11-14" stroke="#fff" stroke-width="4.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'), width: 40, height: 64, anchorY: 32 }
 // Map labels: dark text on a light plate so they read on satellite imagery.
 const LABEL = { background: true, getBackgroundColor: [252, 253, 250, 236] as [number, number, number, number], backgroundPadding: [5, 2] as [number, number], getColor: [13, 25, 18, 255] as [number, number, number, number], fontFamily: FONT, fontWeight: 650, characterSet: 'auto' as const, fontSettings: { sdf: true } }
 const latinOr = (name: string, fallback: string) => (/^[\x20-\x7E\u00C0-\u024F]+$/.test(name) ? name : fallback)
@@ -138,6 +145,14 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
   const [showLeftPanel, setShowLeftPanel] = useState(false)
   const [showRightPanel, setShowRightPanel] = useState(false)
   const [running, setRunning] = useState(false)
+  const [replayNote, setReplayNote] = useState<string | null>(null)
+  const [replayHidden, setReplayHidden] = useState(false)
+  const [broadcast, setBroadcast] = useState<{ key: string; p: number } | null>(null)
+  const [spreadSource, setSpreadSource] = useState<'replay' | 'live'>('replay')
+  const [showFlood, setShowFlood] = useState(true)
+  const [showEvac, setShowEvac] = useState(true)
+  const [showPhones, setShowPhones] = useState(true)
+  const [pop, setPop] = useState<{ key: string; total: number | null; loading: boolean; source: 'worldpop' | 'estimate'; error?: string } | null>(null)
   const prev = useRef<ModelRun | null>(null)
   const pipeRef = useRef<HTMLDivElement>(null)
   const topRef = useRef<HTMLDivElement>(null)
@@ -148,13 +163,23 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
   // ---- the monitoring loop: fetch inputs, run the model, diff against the previous run
   const doRun = async (simNow?: number) => {
     setRunning(true)
+    let failedLive = false
     try {
       const inp = mode === 'live' ? await liveInputs(M) : eventInputs(M, simNow ?? sim)
       const r = runModel(M, inp)
-      setRun(r); setErr(null)
+      setRun(r); setErr(null); setReplayNote(null)
       diff(prev.current, r); prev.current = r
-    } catch (e) { setErr(`Live sources unreachable (${(e as Error).message}). No prediction shown rather than a guess. Try the demo simulation.`) }
-    finally { setRunning(false); setNextAt(Date.now() + (mode === 'live' ? LIVE_EVERY : period * 1000)) }
+    } catch (e) {
+      const why = (e as Error).message
+      if (mode === 'live') {
+        failedLive = true
+        // Live river data is rate limited or down: keep the page usable on the bundled September 2026 replay, clearly labelled,
+        // so the exercise alerts and flood spread still work. It is never presented as live data.
+        const r = runModel(M, eventInputs(M, Date.parse(SPREAD_CLOCK), 'replay'))
+        setRun(r); setErr(null); setReplayNote(why); prev.current = r
+      } else setErr(`Live sources unreachable (${why}). No prediction shown rather than a guess. Try the demo simulation.`)
+    }
+    finally { setRunning(false); setNextAt(Date.now() + (mode === 'live' ? (failedLive ? RETRY_EVERY : LIVE_EVERY) : period * 1000)) }
   }
   const diff = (a: ModelRun | null, b: ModelRun) => {
     const t = b.now, out: typeof events = []
@@ -210,7 +235,11 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
     return { m, p }
   }, [extents])
   // Town-level flood spread (normal river vs flooded river) for the exercise villages, replayed from September 2026.
-  const spread = useMemo(() => (mode === 'live' && terrain ? buildTownSpread(terrain, EXERCISE_IDS.flatMap(id => { const v = VBY.get(id); return v ? [{ id, lat: v.lat, lng: v.lng }] : [] })) : null), [mode, terrain])
+  const replayRun = useMemo(() => runModel(M, eventInputs(M, Date.parse(SPREAD_CLOCK), 'replay')), [])
+  const liveOk = mode === 'live' && !!run && !replayNote
+  const spreadRun = spreadSource === 'live' && liveOk ? run! : replayRun
+  const spreadTowns = useMemo(() => EXERCISE_IDS.flatMap(id => { const v = VBY.get(id); return v ? [{ id, lat: v.lat, lng: v.lng, ch: v.ch }] : [] }), [])
+  const spread = useMemo(() => (mode === 'live' && terrain ? buildTownSpread(terrain, spreadTowns, spreadRun) : null), [mode, terrain, spreadTowns, spreadRun])
   const exercise = useMemo(() => (mode === 'live' && run ? exerciseRisks(spread?.arrival) : []), [mode, run, spread])
   const exerciseIds = useMemo(() => new Set(exercise.map(e => e.id)), [exercise])
   const risk = useMemo(() => new Map([...(run?.villages ?? []), ...exercise].map(v => [v.id, v])), [run, exercise])
@@ -226,7 +255,8 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
 
   const counts = run?.counts[h] ?? { LOW: 291, MEDIUM: 0, HIGH: 0, CRITICAL: 0 }
   const atRiskH = counts.MEDIUM + counts.HIGH + counts.CRITICAL
-  const queue = useMemo(() => [...(run?.villages ?? []), ...exercise].filter(v => (v.level === 'HIGH' || v.level === 'CRITICAL') && alerts[v.id]?.stage !== 'dismissed').sort((a, b) => (a.level === b.level ? (a.impactH ?? 99) - (b.impactH ?? 99) : a.level === 'CRITICAL' ? -1 : 1)), [run, alerts, exercise])
+  // While live data is unavailable the page runs on the bundled replay: those villages are never offered for approval, only the labelled exercise alerts are.
+  const queue = useMemo(() => [...(replayNote ? [] : run?.villages ?? []), ...exercise].filter(v => (v.level === 'HIGH' || v.level === 'CRITICAL') && alerts[v.id]?.stage !== 'dismissed').sort((a, b) => (a.level === b.level ? (a.impactH ?? 99) - (b.impactH ?? 99) : a.level === 'CRITICAL' ? -1 : 1)), [run, alerts, exercise, replayNote])
   const selR = sel ? risk.get(sel) ?? null : null
   const anyApproved = Object.values(alerts).some(a => mode === 'demo' ? ['calling', 'contacted', 'evacuating', 'resolved'].includes(a.stage) : a.approved)
   const anyContacted = Object.values(alerts).some(a => ['contacted', 'evacuating', 'resolved'].includes(a.stage))
@@ -299,9 +329,61 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
   const selTown = sel && exerciseIds.has(sel) ? VBY.get(sel) ?? null : null
   const townLayer = useMemo(() => (spread && terrain && selTown ? townImage(spread, terrain, selTown, h) : null), [spread, terrain, selTown, h])
   const townInfo = useMemo(() => (spread && terrain && selTown ? townFacts(spread, terrain, selTown, h) : null), [spread, terrain, selTown, h])
+  // Two polygons for the selected exercise town. The flood trajectory (red) is where the flood water goes at the selected
+  // horizon. The evacuation zone (violet) is that flood plus watch-level cells plus a safety margin: the region to keep
+  // empty. Phones are estimated, and drawn, only inside the evacuation zone.
+  const zone = useMemo(() => (spread && terrain && selTown ? townZone(spread, terrain, selTown, h) : null), [spread, terrain, selTown, h])
+  const zoneNow = useMemo(() => (spread && terrain && selTown ? townZone(spread, terrain, selTown, 0) : null), [spread, terrain, selTown])
+  const evac = useMemo(() => (spread && terrain && selTown ? townZone(spread, terrain, selTown, h, 'evac') : null), [spread, terrain, selTown, h])
+  const zoneKey = evac && selTown ? `${spreadSource}:${selTown.id}:${h}:${evac.areaKm2}` : ''
+  useEffect(() => {
+    if (!evac || !zoneKey || !evac.polygons.length) { setPop(null); return }
+    let alive = true
+    // show a density-based estimate straight away, then replace it with the live WorldPop total when it arrives
+    const estimate = Math.round(evac.areaKm2 * FALLBACK_DENSITY_PER_KM2)
+    setPop({ key: zoneKey, total: estimate, loading: true, source: 'estimate' })
+    zonePopulation(evac.polygons)
+      .then(total => { if (alive) setPop({ key: zoneKey, total, loading: false, source: 'worldpop' }) })
+      .catch((e: Error) => { if (alive) setPop({ key: zoneKey, total: estimate, loading: false, source: 'estimate', error: e.message }) })
+    return () => { alive = false }
+  }, [zoneKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const popNow = pop && pop.key === zoneKey ? pop : null
+  const phones = popNow?.total != null ? Math.round(popNow.total * PHONES_PER_PERSON) : null
+  const iconCount = phones === null ? 0 : Math.min(phones, 400)
+  const phonePts = useMemo(() => (evac && selTown && iconCount ? placePhones(evac, VILLAGES.map(v => [v.lng, v.lat] as [number, number]), iconCount, selTown.id * 131 + h) : []), [evac, selTown, iconCount, h])
+  const bcKey = selTown ? `${selTown.id}:${h}` : ''
+  const bcP = broadcast && broadcast.key === bcKey ? broadcast.p : null
+  const startBroadcast = () => {
+    if (!bcKey) return
+    const key = bcKey, t0 = Date.now()
+    setBroadcast({ key, p: 0 })
+    const id = setInterval(() => {
+      const p = Math.min(1, (Date.now() - t0) / 3200)
+      setBroadcast({ key, p })
+      if (p >= 1) clearInterval(id)
+    }, 80)
+  }
   if (townLayer && selTown) {
-    L.push(new BitmapLayer({ id: `town-spread-${selTown.id}-${h}`, image: townLayer.canvas, bounds: townLayer.bounds, opacity: 0.92, textureParameters: { minFilter: 'nearest', magFilter: 'nearest' } as any }))
-    L.push(new ScatterplotLayer({ id: 'town-window', data: [selTown], getPosition: (d: any) => [d.lng, d.lat], getRadius: SPREAD_RADIUS_KM * 1000, radiusUnits: 'meters', filled: false, stroked: true, getLineColor: [255, 255, 255, 150], lineWidthMinPixels: 1.5 }))
+    const hzText = h === 0 ? 'now' : `+${h} h`
+    L.push(new BitmapLayer({ id: `town-river-${selTown.id}`, image: townLayer.canvas, bounds: townLayer.bounds, opacity: 0.95, textureParameters: { minFilter: 'nearest', magFilter: 'nearest' } as any }))
+    if (showEvac && evac) L.push(new PolygonLayer({ id: `evac-${selTown.id}-${h}`, data: evac.polygons, getPolygon: (d: any) => d, filled: true, stroked: true, getFillColor: [124, 58, 237, 55], getLineColor: [109, 40, 217, 255], getLineWidth: 3, lineWidthUnits: 'pixels', lineJointRounded: true }))
+    if (showFlood && zoneNow && h > 0) L.push(new PolygonLayer({ id: 'zone-now', data: zoneNow.polygons, getPolygon: (d: any) => d, filled: false, stroked: true, getLineColor: [251, 146, 60, 235], getLineWidth: 2, lineWidthUnits: 'pixels' }))
+    if (showFlood && zone) L.push(new PolygonLayer({ id: `flood-${selTown.id}-${h}`, data: zone.polygons, getPolygon: (d: any) => d, filled: true, stroked: true, getFillColor: [220, 38, 38, 95], getLineColor: [185, 28, 28, 255], getLineWidth: 2.5, lineWidthUnits: 'pixels', lineJointRounded: true }))
+    if (showEvac && showPhones && phonePts.length) {
+      L.push(new IconLayer({
+        id: `phones-${selTown.id}-${h}`, data: phonePts.map((p, i) => ({ p, i })), getPosition: (d: any) => d.p, sizeUnits: 'pixels', getSize: 24, sizeMinPixels: 12, sizeMaxPixels: 34,
+        getIcon: (d: any) => (bcP !== null && d.i / phonePts.length < bcP ? PHONE_OK : PHONE_ALERT), updateTriggers: { getIcon: [bcP, phonePts.length] },
+      }))
+    }
+    if (showFlood && zone?.centroid) {
+      L.push(new TextLayer({ id: 'flood-label', data: [{ p: zone.centroid, t: `Flood trajectory · ${hzText}\n${zone.areaKm2.toLocaleString()} km²` }], getPosition: (d: any) => d.p, getText: (d: any) => d.t, ...LABEL, getSize: 13, getPixelOffset: [0, -26], outlineWidth: 4, outlineColor: [127, 29, 29, 240], lineHeight: 1.2 }))
+    }
+    // anchor the evacuation label at the top edge of its polygon so it never sits on the flood label
+    const evacTop = evac && evac.centroid ? (() => { let best: [number, number] | null = null; for (const pl of evac.polygons) for (const v of pl[0]) if (!best || v[1] > best[1]) best = v; return best ? [evac.centroid![0], best[1]] as [number, number] : null })() : null
+    if (showEvac && evac?.centroid) {
+      const ph = showPhones && phones !== null ? ` · ≈ ${phones.toLocaleString()} phones` : ''
+      L.push(new TextLayer({ id: 'evac-label', data: [{ p: evacTop ?? evac.centroid, t: `Evacuation zone · keep clear · ${hzText}\n${evac.areaKm2.toLocaleString()} km²${ph}` }], getPosition: (d: any) => d.p, getText: (d: any) => d.t, ...LABEL, getSize: 13, getPixelOffset: [0, -4], outlineWidth: 4, outlineColor: [76, 29, 149, 240], lineHeight: 1.2 }))
+    }
   }
   if (layers.predicted && !townLayer && extents && tb && extents[h].canvas) L.push(new BitmapLayer({ id: 'pred-' + h + '-' + run!.now, image: extents[h].canvas, bounds: tb, opacity: 1, textureParameters: { minFilter: 'nearest', magFilter: 'nearest' } as any }))
   if (layers.roads) L.push(new PathLayer({ id: 'roads', data: D.roads, getPath: (d: any) => d.path, getColor: [226, 232, 240, 110], widthMinPixels: 1 }))
@@ -416,6 +498,7 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
       </div>
 
       {err && <div className="lerr"><FiAlertTriangle /> {err}</div>}
+      {replayNote && !err && !replayHidden && <div className="lerr info replay-note" title={replayNote}><FiAlertTriangle /> <span>Showing the September 2026 replay · live river feed resumes automatically</span><button className="ghost" aria-label="Dismiss" onClick={() => setReplayHidden(true)}><FiX /></button></div>}
       {!run && !err && <div className="lerr info"><FiRefreshCw className="spin" /> Fetching river and rain data, running the model…</div>}
 
       <button className={'rail-toggle rail-toggle-left' + (showLeftPanel ? ' open' : '')} onClick={() => setShowLeftPanel(v => !v)} aria-expanded={showLeftPanel} aria-controls="live-left-panel">
@@ -448,7 +531,7 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
 
       {/* ---------- right: alert queue or village ---------- */}
       {run && (selR || queue.length > 0 || detail) && <aside id="live-right-panel" className={'lpanel right' + (showRightPanel ? ' panel-visible' : ' panel-hidden')}>
-        {selR ? <VillagePanel r={selR} route={routes.get(selR.id) ?? null} run={run} mode={mode} h={h} st={alerts[selR.id]} setSt={s => setAlerts(a => ({ ...a, [selR.id]: { ...(a[selR.id] ?? {}), ...s } as AlertState }))} onClose={closeSel} onOpenIncident={onOpenIncident} exercise={exerciseIds.has(selR.id)} googleDrive={gDrive} realInfo={real} townInfo={townInfo} />
+        {selR ? <VillagePanel r={selR} route={routes.get(selR.id) ?? null} run={run} mode={mode} h={h} st={alerts[selR.id]} setSt={s => setAlerts(a => ({ ...a, [selR.id]: { ...(a[selR.id] ?? {}), ...s } as AlertState }))} onClose={closeSel} onOpenIncident={onOpenIncident} exercise={exerciseIds.has(selR.id)} googleDrive={gDrive} realInfo={real} townInfo={townInfo} zoneInfo={zone && evac && selTown ? { floodKm2: zone.areaKm2, evacKm2: evac.areaKm2, population: popNow?.total ?? null, phones, loading: !!popNow?.loading, source: popNow?.source ?? 'estimate', error: popNow?.error, progress: bcP, icons: phonePts.length } : null} spreadUi={{ source: spreadSource, setSource: setSpreadSource, liveOk, showFlood, setShowFlood, showEvac, setShowEvac, showPhones, setShowPhones }} onBroadcast={startBroadcast} />
           : <AlertQueue exerciseIds={exerciseIds} queue={queue} alerts={alerts} onView={pick} onDismiss={id => setAlerts(a => ({ ...a, [id]: { stage: 'dismissed' } }))} onOpenIncident={onOpenIncident} mode={mode} />}
         {stats && detail && <section>
           <div className="kicker">Potentially affected at {HLABEL[h]}</div>
@@ -467,7 +550,7 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
       <footer className="lv-dock">
         <span className="lv-hz-label" title="The horizon applies to the Gandak village model and the flood layer, not to the India river points, which always show the 7-day forecast.">Gandak village forecast</span>
         <div className="lv-hz" role="group" aria-label="Gandak village forecast horizon">
-          {HORIZONS.map(x => { const n = run ? run.counts[x].MEDIUM + run.counts[x].HIGH + run.counts[x].CRITICAL : 0; return <button key={x} className={h === x ? 'on' : ''} onClick={() => setH(x)}>{x === 0 ? 'Now' : `+${x}h`}{n > 0 && <b>{n}</b>}</button> })}
+          {HORIZONS.map(x => <button key={x} className={h === x ? 'on' : ''} onClick={() => setH(x)}>{x === 0 ? 'Now' : `+${x}h`}</button>)}
         </div>
         <span className="lv-sep" />
         {mode === 'demo' ? <>
@@ -630,11 +713,12 @@ function AlertQueue({ exerciseIds, queue, alerts, onView, onDismiss, onOpenIncid
   )
 }
 
-function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncident, exercise, googleDrive, realInfo, townInfo }: { townInfo?: TownFacts | null; googleDrive?: { km: number; minutes: number } | null; realInfo?: { walk: { km: number; minutes: number } | null; drive: { km: number; minutes: number } | null; busy: boolean; note: string }; exercise: boolean; r: VillageRisk; route: Route | null; run: ModelRun; mode: Mode; h: number; st?: AlertState; setSt: (s: Partial<AlertState>) => void; onClose: () => void; onOpenIncident: (id: string) => void }) {
+function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncident, exercise, googleDrive, realInfo, townInfo, zoneInfo, spreadUi, onBroadcast }: { townInfo?: TownFacts | null; zoneInfo?: ZoneUi | null; spreadUi?: SpreadUi; onBroadcast?: () => void; googleDrive?: { km: number; minutes: number } | null; realInfo?: { walk: { km: number; minutes: number } | null; drive: { km: number; minutes: number } | null; busy: boolean; note: string }; exercise: boolean; r: VillageRisk; route: Route | null; run: ModelRun; mode: Mode; h: number; st?: AlertState; setSt: (s: Partial<AlertState>) => void; onClose: () => void; onOpenIncident: (id: string) => void }) {
   const v = VBY.get(r.id)!
   const [why, setWhy] = useState(false)
   const [review, setReview] = useState(false)
-  const [msg, setMsg] = useState(() => hindiAlert(v.name, r, route, mode === 'demo' || exercise))
+  const [routeMore, setRouteMore] = useState(false)
+  const [msg, setMsg] = useState(() => hindiAlert(v.name, r, route, mode === 'demo'))
   const [demoPhone, setDemoPhone] = useState(true)
   const [contacts, setContacts] = useState<Contact[]>([])
   const [picked, setPicked] = useState<string[]>([])
@@ -642,7 +726,7 @@ function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncide
   const [keyIn, setKeyIn] = useState('')
   const [, force] = useState(0)
   const demoMode = mode === 'demo'
-   useEffect(() => { setMsg(hindiAlert(v.name, r, route, mode === 'demo' || exercise)); setReview(false) }, [r.id, mode, exercise]) // eslint-disable-line
+   useEffect(() => { setMsg(hindiAlert(v.name, r, route, mode === 'demo')); setReview(false) }, [r.id, mode, exercise]) // eslint-disable-line
    useEffect(() => { if (demoMode || exercise || !hasKey()) return; listContacts(v.lat, v.lng, 25).then(setContacts).catch(() => {}) }, [r.id, keyIn, demoMode, exercise]) // eslint-disable-line
    useEffect(() => {
       const incidentId = st?.incident?.id
@@ -667,15 +751,16 @@ function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncide
       if (!a) throw new Error('This village is not part of the exercise session.')
       key = approvalKey(session.id, a.id)
       horizon = (HORIZON_SET.includes(h) ? h : 6) as Horizon
-      if (a.approvalStatus === 'approved') { setSt(exerciseOutcome(a, session.demoDestination.masked)); return }
+      if (a.approvalStatus === 'approved') { setSt({ ...exerciseOutcome(a, session.demoDestination.masked), esc: { sessionId: session.id, alertId: a.id } }); return }
       const prior = readAttempt(key)
       if (prior && (prior.state === 'inflight' || prior.state === 'unknown')) throw new Error('An earlier approval of this alert was not confirmed. It will not be repeated; refresh to reconcile.')
       requestId = prior?.requestId ?? crypto.randomUUID()
       writeAttempt(key, { requestId, horizon, state: 'inflight' })
       setSt({ stage: 'calling' })
-      const res = await approveAlert(session.id, a.id, requestId, horizon, { hi: msg, en: englishAlert(v.name, r, route, true) })
+      const citizen = citizenAlert(v.name, v.district, r.impactH, route ? route.shelter.n : null, route ? route.km : null, false)
+      const res = await approveAlert(session.id, a.id, requestId, horizon, { hi: msg, en: englishAlert(v.name, r, route, mode === 'demo') }, citizen)
       writeAttempt(key, { requestId, horizon, state: 'settled' })
-      setSt(exerciseOutcome(res.alert, session.demoDestination.masked))
+      setSt({ ...exerciseOutcome(res.alert, session.demoDestination.masked), esc: { sessionId: session.id, alertId: a.id } })
     } catch (e) {
       if (requestId && key) { try { writeAttempt(key, { requestId, horizon, state: e instanceof DemoApiError && e.ambiguous ? 'unknown' : 'rejected' }) } catch { /* storage unavailable */ } }
       const message = (e as Error).message
@@ -714,33 +799,37 @@ function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncide
   return (
     <section className="vpanel">
       <div className="vhead"><div><div className="kicker">{v.district ? `${v.district} district` : 'Village'} · {v.ch.toFixed(0)} km below Devghat</div><div className="h big">{v.name}</div></div><button className="x" onClick={onClose} aria-label="Close"><FiX /></button></div>
-      <div className="pills"><span className={'pill lv-' + r.level}>{r.level} RISK</span>{(mode === 'demo' || exercise) && <span className="pill sim">{exercise ? 'EXERCISE' : 'SIMULATION'}</span>}<span className="pill safe">score {r.score}/100</span></div>
-      <dl className="kv">
-        <dt>Flood probability</dt><dd><b>{Math.round(r.pMax * 100)}%</b> within 24 h · {Math.round(r.pAt[h] * 100)}% at {HLABEL[h]}</dd>
-        <dt>Expected impact</dt><dd><b>{windowText(r)}</b></dd>
-        <dt>Predicted depth</dt><dd>Not estimated. The model predicts whether water reaches the village, not how deep; depth needs a stage gauge or hydraulic model.</dd>
-        <dt>Confidence</dt><dd>{r.conf.toUpperCase()}</dd>
-        <dt>Recommended</dt><dd><b>{r.action}</b></dd>
-      </dl>
+      <div className="vp-sum">
+        <div className="vp-tags"><span className={'pill lv-' + r.level}>{r.level} RISK</span>{(mode === 'demo' || exercise) && <span className="pill sim">{exercise ? 'EXERCISE' : 'SIMULATION'}</span>}</div>
+        <div className="vp-kpis">
+          <div><span>Flood chance</span><b>{Math.round(r.pMax * 100)}%</b></div>
+          <div><span>Water arrives</span><b>{exercise && townInfo ? (townInfo.arrivalH === null ? 'Not in 24 h' : townInfo.arrivalH === 0 ? 'Now' : `~${townInfo.arrivalH} h`) : r.impactH === null ? 'Not in 48 h' : r.impactH === 0 ? 'Now' : `~${r.impactH} h`}</b></div>
+        </div>
+        <div className="vp-action">{r.action}</div>
+      </div>
       <button className="whybtn" onClick={() => setWhy(w => !w)}>{why ? <FiChevronDown /> : <FiChevronRight />} Why is this village at risk?</button>
       {why && <div className="why">
         {r.factors.map(f => <div key={f.label} className="fac"><div className="fl"><span>{f.pts >= 3 ? '+ ' : ''}{f.label}</span><span className="dim">{Math.round(f.pts)}/{f.max}</span></div><div className="fb"><i style={{ width: `${(f.pts / f.max) * 100}%` }} /></div><div className="fd">{f.detail}</div></div>)}
         <div className="dim tiny">Risk score {r.score} of {maxPts}. CRITICAL needs ≥50% probability, score ≥65 and impact within 12 h. Probability comes from a logistic model fitted to 2026 radar; its terms (log-odds):</div>
         <ul className="terms">{r.terms.map(t => <li key={t.label}><span>{t.label}</span><span className={t.value >= 0 ? 'pos' : 'neg'}>{t.value >= 0 ? '+' : ''}{t.value.toFixed(2)}</span></li>)}</ul>
       </div>}
-      {exercise && townInfo && <TownSpread name={v.name} f={townInfo} />}
-      <div className="kicker mt">Evacuation route</div>
-      {route ? <>
-        <p className="route"><b>{v.name}</b> → {route.km.toFixed(1)} km {route.ok ? 'route avoiding likely water' : 'least-exposed route'} ({route.roadKm.toFixed(1)} km on mapped roads) → <b>{route.shelter.n}</b> ({route.shelter.a === 'h' ? 'hospital' : 'school / college'}{['School', 'Hospital'].includes(route.shelter.n) ? ', unnamed in OpenStreetMap' : ''})</p>
-        <p className="note">{route.why}</p>
-        <div className="route-legend note tight">
-          <div><span style={{ color: '#12805c', fontWeight: 700 }}>━ By car</span>: {realInfo?.drive ? `${realInfo.drive.km.toFixed(1)} km, about ${realInfo.drive.minutes} min, along mapped roads` : realInfo?.busy ? 'finding a road route…' : 'no driving route on the mapped roads'}{googleDrive ? ` · Google Maps by car: ${googleDrive.km.toFixed(1)} km, ${googleDrive.minutes} min` : ''}</div>
-          <div><span style={{ color: '#1769e0', fontWeight: 700 }}>┅ On foot</span>: {realInfo?.walk ? `${realInfo.walk.km.toFixed(1)} km, about ${realInfo.walk.minutes} min, along mapped roads and paths` : realInfo?.busy ? 'finding a walking route…' : 'no walking route found'}</div>
-          {realInfo?.note && <div>{realInfo.note}</div>}
-          <div>Flood check: the model rates the destination dry in the 24 h prediction. The lines follow mapped roads and are not checked against the flood map.</div>
-        </div>
-        <p className="note dim">Shelter: nearest mapped school, college or hospital outside predicted water (OpenStreetMap). Not a confirmed relief camp.</p>
-      </> : <p className="note">No school or hospital that stays dry within 30 km without crossing a river.</p>}
+      {exercise && townInfo && spreadUi && <TownSpread name={v.name} f={townInfo} zone={zoneInfo ?? null} ui={spreadUi} onBroadcast={onBroadcast} />}
+      <section className="vp-route">
+        <h4>Safe route</h4>
+        {route ? <>
+          <p className="vp-dest"><b>{route.shelter.n}</b><span>{route.shelter.a === 'h' ? 'Hospital' : 'School / college'} · {route.km.toFixed(1)} km{realInfo?.drive ? ` · ${realInfo.drive.minutes} min by car` : ''}{realInfo?.walk ? ` · ${realInfo.walk.minutes} min on foot` : ''}</span></p>
+          {!route.ok && <p className="vp-warn"><FiAlertTriangle /> No fully dry route. This is the least exposed one: leave before the water arrives.</p>}
+          <button className="whybtn" onClick={() => setRouteMore(m => !m)}>{routeMore ? <FiChevronDown /> : <FiChevronRight />} Route details</button>
+          {routeMore && <div className="why">
+            <p className="note">{route.why}</p>
+            <div className="route-legend note tight">
+              <div><span style={{ color: '#12805c', fontWeight: 700 }}>━ By car</span>: {realInfo?.drive ? `${realInfo.drive.km.toFixed(1)} km, about ${realInfo.drive.minutes} min` : realInfo?.busy ? 'finding a road route…' : 'no driving route on the mapped roads'}{googleDrive ? ` · Google Maps: ${googleDrive.km.toFixed(1)} km, ${googleDrive.minutes} min` : ''}</div>
+              <div><span style={{ color: '#1769e0', fontWeight: 700 }}>┅ On foot</span>: {realInfo?.walk ? `${realInfo.walk.km.toFixed(1)} km, about ${realInfo.walk.minutes} min` : realInfo?.busy ? 'finding a walking route…' : 'no walking route found'}</div>
+            </div>
+            <p className="note dim">Nearest mapped school, college or hospital outside predicted water (OpenStreetMap). Not a confirmed relief camp.</p>
+          </div>}
+        </> : <p className="note">No school or hospital that stays dry within 30 km without crossing a river.</p>}
+      </section>
 
       {route && <RouteShare v={v} r={r} route={route} exercise={exercise} />}
 
@@ -762,7 +851,7 @@ function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncide
             <div className="aqb"><button className="pri" disabled={!demoMode && !exercise && !picked.length && !demoPhone} onClick={approve}><FiCheckCircle /> {demoMode ? 'Simulate approval and call' : exercise ? 'Approve exercise alert and call demo phone' : 'Approve alert and call'}</button><button className="ghost" onClick={() => setReview(false)}>Cancel</button>{exercise && <button className="ghost" onClick={() => { setSt({ stage: 'dismissed' }); onClose() }}>Reject</button>}</div>
           </>}
         </>}
-         {(stage !== 'review' && stage !== 'dismissed' || !!st?.incident) && <ol className="steps">
+         {exercise && st?.esc ? <EscalationTracker esc={st.esc} /> : (stage !== 'review' && stage !== 'dismissed' || !!st?.incident) && <ol className="steps">
            {[['Alert created', demoMode ? simulatedApproval : exercise ? !!st?.approved : !!st?.incident], ['Operator approved', demoMode ? simulatedApproval : !!st?.approved], ['Hindi AI call placed', ['contacted', 'evacuating', 'resolved'].includes(stage)], [exercise ? 'Village head reached (exercise: demo phone)' : 'Sarpanch contacted', ['contacted', 'evacuating', 'resolved'].includes(stage)], ['Evacuation initiated', ['evacuating', 'resolved'].includes(stage)], ['Resolved', stage === 'resolved']].map(([l, ok]) => <li key={l as string} className={ok ? 'ok' : ''}>{ok ? <FiCheckCircle /> : <span aria-label="Not completed">○</span>} {demoMode ? `Simulated: ${l}` : l}</li>)}
          </ol>}
          {stage === 'approving' && <p className="note"><FiRefreshCw className="spin" /> {demoMode ? 'Simulating alert creation and approval…' : 'Creating incident and recording approval…'}</p>}
@@ -780,40 +869,125 @@ function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncide
   )
 }
 
-function TownSpread({ name, f }: { name: string; f: TownFacts }) {
-  const [params, setParams] = useState(false)
+type ZoneUi = { floodKm2: number; evacKm2: number; population: number | null; phones: number | null; loading: boolean; source: 'worldpop' | 'estimate'; error?: string; progress: number | null; icons: number }
+type SpreadUi = { source: 'replay' | 'live'; setSource: (s: 'replay' | 'live') => void; liveOk: boolean; showFlood: boolean; setShowFlood: (v: boolean) => void; showEvac: boolean; setShowEvac: (v: boolean) => void; showPhones: boolean; setShowPhones: (v: boolean) => void }
+function TownSpread({ name, f, zone, ui, onBroadcast }: { name: string; f: TownFacts; zone: ZoneUi | null; ui: SpreadUi; onBroadcast?: () => void }) {
+  const [more, setMore] = useState(false)
   const hz = f.horizon === 0 ? 'now' : `+${f.horizon} h`
-  const arrive = f.arrivalH === null ? 'not within 24 h' : f.arrivalH === 0 ? 'already at the village' : `about ${f.arrivalH} h`
+  const phones = zone?.phones ?? null
+  const notified = phones !== null && zone?.progress != null ? Math.round(zone.progress * phones) : 0
+  const done = (zone?.progress ?? 0) >= 1
   return (
-    <div className="town-spread">
-      <div className="kicker mt">Flood spread · normal river vs flooded river</div>
-      <div className="town-legend">
-        <span><i style={{ background: '#2563eb' }} />Normal river channel</span>
-        <span><i style={{ background: '#fb923c' }} />Extra land under water{f.horizon > 0 ? ' (already at NOW)' : ''}</span>
-        {f.horizon > 0 && <span><i style={{ background: '#dc2626' }} />New water since NOW</span>}
+    <section className="ts">
+      <div className="ts-head"><h4>Flood impact zone</h4>
+        <div className="ts-seg" role="group" aria-label="Data source">
+          <button className={ui.source === 'replay' ? 'on' : ''} onClick={() => ui.setSource('replay')} title="September 2026 flood, replayed">Replay</button>
+          <button className={ui.source === 'live' ? 'on' : ''} disabled={!ui.liveOk} title={ui.liveOk ? 'Live river forecast' : 'Live river feed is unavailable right now'} onClick={() => ui.setSource('live')}>Live</button>
+        </div>
       </div>
-      <dl className="kv small">
-        <dt>Water reaches {name}</dt><dd><b>{arrive}</b>{f.reached ? ` · water is at the village at ${hz}` : ` · not yet at the village at ${hz}`}</dd>
-        <dt>Extra flooded area at {hz}</dt><dd><b>{f.extraKm2.toLocaleString()} km²</b> beyond the normal {f.normalKm2.toLocaleString()} km² river, within {f.radiusKm} km of the village{f.horizon > 0 ? ` (+${f.growthKm2.toLocaleString()} km² since NOW)` : ''}</dd>
-        <dt>Land within 2 km</dt><dd>{Math.round(f.share2km * 100)}% under predicted water</dd>
-        <dt>Nearest water</dt><dd>{f.waterKm === null ? 'No predicted flood water in the window' : `flood edge ${f.waterKm.toFixed(1)} km away`}{f.riverKm !== null ? ` · normal river ${f.riverKm.toFixed(1)} km away` : ''}</dd>
-        <dt>Highest ground reached</dt><dd>{f.maxHandM === null ? '—' : `${f.maxHandM.toFixed(1)} m above the channel`}</dd>
-      </dl>
-      <p className="note tight">Replay of the September 2026 Gandak flood at {fmtIST(Date.parse(SPREAD_CLOCK))}. Not a live forecast and not a depth estimate.</p>
-      <button className="whybtn" onClick={() => setParams(p => !p)}>{params ? <FiChevronDown /> : <FiChevronRight />} Parameters used for this map</button>
-      {params && <div className="why">
-        <ul className="terms">
-          <li><span>Flood probability</span><span>logistic(b0 {M.pixel.b0.toFixed(2)} + {M.pixel.b[0].toFixed(2)}·ln(Q/4000) {M.pixel.b[1].toFixed(2)}·HAND {M.pixel.b[2].toFixed(2)}·dist)</span></li>
-          <li><span>Wet if probability ≥</span><span>{M.pixel.pstar}</span></li>
-          <li><span>Q (river discharge)</span><span>GloFAS v4, highest flow in previous 72 h, at the cell's river chainage</span></li>
-          <li><span>HAND</span><span>Height above nearest channel, Copernicus DEM, −5 to 25 m</span></li>
-          <li><span>dist</span><span>Distance to the river, km (0.18 km cells)</span></li>
-          <li><span>Normal river</span><span>JRC permanent surface water</span></li>
-          <li><span>Connectivity</span><span>Wet cells kept only if linked to the river (4-neighbour)</span></li>
-          <li><span>Window</span><span>{SPREAD_RADIUS_KM} km around village; reached = water within {REACH_KM} km</span></li>
-          <li><span>Calibration</span><span>3 Sentinel-1 radar flood maps, Sep–Oct 2026</span></li>
-        </ul>
+
+      <div className="ts-chips" role="group" aria-label="Map layers">
+        <button className={'chip flood' + (ui.showFlood ? ' on' : '')} aria-pressed={ui.showFlood} onClick={() => ui.setShowFlood(!ui.showFlood)}><i />Flood</button>
+        <button className={'chip evac' + (ui.showEvac ? ' on' : '')} aria-pressed={ui.showEvac} onClick={() => ui.setShowEvac(!ui.showEvac)}><i />Evacuation zone</button>
+        <button className={'chip phone' + (ui.showPhones && ui.showEvac ? ' on' : '')} aria-pressed={ui.showPhones && ui.showEvac} disabled={!ui.showEvac} onClick={() => ui.setShowPhones(!ui.showPhones)}><i />Phones</button>
+      </div>
+
+      <div className="ts-hero">
+        <span>Phones in the evacuation zone</span>
+        <b>{phones !== null ? `≈ ${phones.toLocaleString()}` : '—'}</b>
+        <em>{zone?.population != null ? `≈ ${zone.population.toLocaleString()} people` : ''}{zone ? ` · ${zone.evacKm2.toLocaleString()} km²` : ''}</em>
+      </div>
+
+      {phones !== null && (zone?.progress == null
+        ? <button className="pri ts-send" disabled={phones === 0} onClick={onBroadcast}><FiSend /> Send distress signal</button>
+        : <div className="ts-prog" aria-live="polite"><div className="zone-bar"><i style={{ width: `${Math.round((zone?.progress ?? 0) * 100)}%` }} /></div>
+          <span>{done ? <FiCheckCircle /> : <FiRefreshCw className="spin" />} <b>{notified.toLocaleString()}</b> of {phones.toLocaleString()} phones notified{done ? ' · complete' : '…'}</span></div>)}
+
+      <div className="ts-mini">
+        <div><span>Water reaches {name}</span><b>{f.arrivalH === null ? 'Not within 24 h' : f.arrivalH === 0 ? 'Now' : `~${f.arrivalH} h`}</b></div>
+        <div><span>Flood at {hz}</span><b>{(zone?.floodKm2 ?? f.extraKm2).toLocaleString()} km²</b></div>
+      </div>
+
+      <p className="ts-note">Simulation only: no call or message is sent. In practice the zone goes out as one cell broadcast.</p>
+
+      <button className="whybtn" onClick={() => setMore(m => !m)}>{more ? <FiChevronDown /> : <FiChevronRight />} Details and parameters</button>
+      {more && <div className="why">
+        <dl className="kv small">
+          <dt>Data</dt><dd>{ui.source === 'replay' ? `Replay of the Sept 2026 flood (${fmtIST(Date.parse(SPREAD_CLOCK))})` : 'Live GloFAS + rain forecast'}</dd>
+          <dt>Population</dt><dd>{zone?.source === 'worldpop' ? 'WorldPop 2020, live' : `Density estimate, about ${FALLBACK_DENSITY_PER_KM2}/km² (WorldPop slow or unavailable)`}</dd>
+          <dt>Land within 2 km</dt><dd>{Math.round(f.share2km * 100)}% under predicted water</dd>
+          <dt>Nearest water</dt><dd>{f.waterKm === null ? 'None in the reach' : `${f.waterKm.toFixed(1)} km`}</dd>
+          <dt>Highest ground</dt><dd>{f.maxHandM === null ? '—' : `${f.maxHandM.toFixed(1)} m above channel`}</dd>
+          {f.horizon > 0 && <><dt>Growth since NOW</dt><dd>+{f.growthKm2.toLocaleString()} km²</dd></>}
+        </dl>
+        <dl className="param-grid">
+          <dt>Flood probability</dt><dd>logistic({M.pixel.b0.toFixed(2)} + {M.pixel.b[0].toFixed(2)}·ln(Q/4000) {M.pixel.b[1].toFixed(2)}·HAND {M.pixel.b[2].toFixed(2)}·dist), wet if ≥ {M.pixel.pstar}</dd>
+          <dt>Inputs</dt><dd>GloFAS discharge (72 h high), Copernicus DEM height above channel, distance to river, JRC normal river</dd>
+          <dt>Flood polygon</dt><dd>Connected flooded cells within ±{REACH_HALF_KM} km of the village along the river</dd>
+          <dt>Evacuation zone</dt><dd>Flood now and at the next step, plus {(EVAC_BUFFER_CELLS * 0.2).toFixed(1)} km margin</dd>
+          <dt>Phones</dt><dd>Population × {PHONES_PER_PERSON} (assumption); up to {zone?.icons ?? 0} icons, positions illustrative</dd>
+          <dt>Calibration</dt><dd>3 Sentinel-1 radar flood maps, Sep–Oct 2026</dd>
+        </dl>
       </div>}
+    </section>
+  )
+}
+
+function EscalationTracker({ esc }: { esc: { sessionId: string; alertId: string } }) {
+  const [v, setV] = useState<EscalationView | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [msg, setMsg] = useState(false)
+  const [, tick] = useState(0)
+  useEffect(() => {
+    let alive = true, timer: ReturnType<typeof setTimeout> | undefined
+    const done = new Set(['escalated', 'rejected', 'expired', 'failed'])
+    const load = async () => {
+      try {
+        const x = await getEscalation(esc.sessionId, esc.alertId)
+        if (!alive) return
+        setV(x); setErr(null)
+        if (x && done.has(x.status) && x.citizen.call?.status !== undefined) return
+      } catch (e) { if (alive) setErr((e as Error).message) }
+      timer = setTimeout(load, 1500)
+    }
+    void load()
+    const clock = setInterval(() => tick(n => n + 1), 1000)
+    return () => { alive = false; if (timer) clearTimeout(timer); clearInterval(clock) }
+  }, [esc.sessionId, esc.alertId])
+
+  if (!v) return <div className="esc"><div className="kicker mt">Live escalation</div><p className="note">{err ?? 'Opening the escalation…'}</p></div>
+  const left = Math.max(0, Math.round((Date.parse(v.expiresAt) - Date.now()) / 1000))
+  const waiting = v.status === 'awaiting_sarpanch'
+  const escalated = v.status === 'escalated' || v.status === 'escalating'
+  const banner = escalated
+    ? { cls: 'go', icon: <FiCheckCircle />, title: 'ESCALATED', text: `Sarpanch confirmed${v.decidedVia ? ` via ${v.decidedVia}` : ''}. ${v.citizen.call?.status === 'sent' ? 'Citizens in the zone are being called.' : v.status === 'escalating' ? 'Calling the citizens…' : 'Citizen call: ' + (v.citizen.call?.status ?? 'pending')}` }
+    : v.status === 'rejected' ? { cls: 'no', icon: <FiX />, title: 'REJECTED: FALSE ALARM', text: `Sarpanch rejected${v.decidedVia ? ` via ${v.decidedVia}` : ''}. Nobody else is contacted.` }
+    : v.status === 'expired' ? { cls: 'no', icon: <FiAlertTriangle />, title: 'EXPIRED', text: 'No decision in time. Nothing was escalated.' }
+    : v.status === 'failed' ? { cls: 'no', icon: <FiAlertTriangle />, title: 'ESCALATION FAILED', text: v.citizen.call?.note ?? 'The citizen call could not be placed.' }
+    : { cls: 'wait', icon: <FiRefreshCw className="spin" />, title: 'WAITING FOR THE SARPANCH', text: `${v.acknowledged ? 'The Sarpanch heard the full message. ' : ''}Answer on the call (say one / yes, or zero / no) or on Telegram. Expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}.` }
+  const rows: { label: string; state: 'ok' | 'wait' | 'no' | 'idle'; detail?: string }[] = [
+    { label: 'Operator approved the alert', state: 'ok' },
+    { label: `Sarpanch called${v.sarpanch.phone ? ` (${v.sarpanch.phone})` : ''}`, state: v.sarpanch.call.status === 'dispatched' ? 'ok' : 'no', detail: 'Two-way IVR: reads the advisory, then listens for one / zero / two or yes / no.' },
+    waiting ? { label: v.acknowledged ? 'Sarpanch heard the message, no decision yet' : 'Waiting for the Sarpanch to decide', state: 'wait', detail: v.channels.telegram ? 'Call answer or Telegram buttons: whichever comes first.' : 'Telegram is not configured.' }
+      : v.status === 'rejected' ? { label: 'Sarpanch rejected: false alarm', state: 'no', detail: `Via ${v.decidedVia ?? 'reply'}.` }
+      : v.status === 'expired' ? { label: 'No decision in time', state: 'no' }
+      : { label: 'Sarpanch confirmed the alert', state: 'ok', detail: `Via ${v.decidedVia ?? 'reply'}.` },
+    { label: `Citizens in the zone called${v.citizen.phone ? ` (${v.citizen.phone})` : ''}`, state: escalated || v.status === 'failed' ? (v.citizen.call?.status === 'sent' ? 'ok' : v.status === 'escalating' ? 'wait' : 'no') : 'idle', detail: escalated ? (v.citizen.call?.status === 'sent' ? 'One urgent line, male voice. Dispatched, not confirmed answered.' : v.citizen.call?.note ?? '') : 'Only after the Sarpanch confirms.' },
+  ]
+  return (
+    <div className="esc" aria-live="polite">
+      <div className="kicker mt">Live escalation · Sarpanch → citizens</div>
+      <div className={'esc-banner ' + banner.cls}><span className="ic">{banner.icon}</span><div><b>{banner.title}</b><small>{banner.text}</small></div></div>
+      <ol className="esc-steps">
+        {rows.map(r => <li key={r.label} className={r.state}><span className="dot">{r.state === 'ok' ? <FiCheckCircle /> : r.state === 'wait' ? <FiRefreshCw className="spin" /> : r.state === 'no' ? <FiX /> : '○'}</span><div><b>{r.label}</b>{r.detail && <small>{r.detail}</small>}</div></li>)}
+      </ol>
+      <div className="kicker mt">Live log</div>
+      <ul className="esc-log">
+        {[...v.events].reverse().map((e, i) => <li key={i} className={e.kind}><time>{new Date(e.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Asia/Kolkata' })}</time><span>{e.text}</span></li>)}
+      </ul>
+      {v.citizenMessage.en && <><button className="whybtn" onClick={() => setMsg(m => !m)}>{msg ? <FiChevronDown /> : <FiChevronRight />} Message citizens will hear</button>
+        {msg && <div className="why"><p className="note">{v.citizenMessage.hi}</p><p className="note dim">{v.citizenMessage.en}</p></div>}</>}
+      {err && <p className="err"><FiAlertTriangle /> {err}</p>}
     </div>
   )
 }

@@ -1,21 +1,21 @@
-import { HORIZONS, eventInputs, runModel, type ModelRun } from '../engine/core'
+import { HORIZONS, type ModelRun } from '../engine/core'
 import { extentAt, type Terrain } from '../engine/terrain'
 import { M } from '../live/shared'
 import { connectedSpread } from './connectivity'
 
 /**
- * Town-level flood spread for the five exercise villages.
+ * Town-level flood spread and impact zone.
  *
- * The browser replays the September 2026 Gandak flood at a fixed clock, turns the discharge forecast into
- * a per-cell flood probability (the same fitted pixel model the rest of the app uses), keeps only the wet
- * cells that are connected to the river, and compares them with the normal channel. The difference is the
- * "extra area" a flooded river covers. It is a replay of a past event, never a live forecast.
+ * The discharge forecast of a model run (live, or the bundled September 2026 replay) is turned into a per-cell flood
+ * probability by the fitted pixel model, only cells connected to the river are kept, and the normal channel is
+ * subtracted. The impact zone of a town is the flooded land along the river reach that affects it: the cells whose
+ * river chainage lies within REACH_HALF_KM upstream or downstream of the village, out to the natural edge of the flood.
  */
 
 /** Replay clock: the flood front is still upstream (dry at the towns now), and reaches all five within 24 h. */
 export const SPREAD_CLOCK = '2026-09-27T12:00:00Z'
-/** Window around the town that is analysed and drawn. */
-export const SPREAD_RADIUS_KM = 12
+/** Half-length, along the river, of the reach whose flooded land forms a town's impact zone. */
+export const REACH_HALF_KM = 8
 /** The flood "reaches" a town when connected water is within this distance of the village point. */
 export const REACH_KM = 1
 /** Hours (hourly to 12 h, then every 3 h) at which the arrival time is evaluated. */
@@ -23,10 +23,9 @@ const ARRIVAL_HOURS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 18, 21, 24]
 const KM_PER_DEG = 111.32
 
 export type SpreadHorizon = (typeof HORIZONS)[number]
-type Town = { id: number; lat: number; lng: number }
+export type Town = { id: number; lat: number; lng: number; /** km below Devghat along the river */ ch: number }
 
 export type TownSpreadModel = {
-  clock: string
   run: ModelRun
   /** Connected-spread mask per horizon: 0 dry, 1 extra flood water, 2 normal river. */
   masks: Record<number, Uint8Array>
@@ -40,10 +39,11 @@ export type TownSpreadModel = {
 
 export type TownFacts = {
   horizon: number
-  radiusKm: number
-  /** Normal river (JRC permanent water) inside the window. */
+  /** Length of river reach the zone covers, km. */
+  reachKm: number
+  /** Normal river (JRC permanent water) inside the reach. */
   normalKm2: number
-  /** Extra land under predicted flood water inside the window. */
+  /** Extra land under predicted flood water inside the reach. */
   extraKm2: number
   /** Extra land added since NOW. */
   growthKm2: number
@@ -55,19 +55,18 @@ export type TownFacts = {
   riverKm: number | null
   /** Distance from the village to the nearest predicted flood water, km. */
   waterKm: number | null
-  /** Highest ground (m above channel) the water reaches inside the window. */
+  /** Highest ground (m above channel) the water reaches inside the reach. */
   maxHandM: number | null
   /** Mean flood probability of the flooded cells, 0-1. */
   meanProb: number | null
   arrivalH: number | null
 }
 
-const cache = new WeakMap<Terrain, TownSpreadModel>()
+const cache = new WeakMap<ModelRun, TownSpreadModel>()
 
-export function buildTownSpread(terrain: Terrain, towns: Town[]): TownSpreadModel {
-  const hit = cache.get(terrain)
+export function buildTownSpread(terrain: Terrain, towns: Town[], run: ModelRun): TownSpreadModel {
+  const hit = cache.get(run)
   if (hit) return hit
-  const run = runModel(M, eventInputs(M, Date.parse(SPREAD_CLOCK), 'demo'))
   const { cols, rows } = terrain
   const masks: Record<number, Uint8Array> = {}, probs: Record<number, Uint8Array> = {}
   const arrival = new Map<number, number | null>(towns.map(t => [t.id, null]))
@@ -90,17 +89,46 @@ export function buildTownSpread(terrain: Terrain, towns: Town[]): TownSpreadMode
   }
   const a = masks[0], b = masks[24], m = new Uint8Array(a.length), p = new Uint8Array(a.length)
   for (let i = 0; i < a.length; i++) { m[i] = a[i] === 2 || b[i] === 2 ? 2 : a[i] || b[i] ? 1 : 0; p[i] = Math.max(probs[0][i], probs[24][i]) }
-  const model = { clock: SPREAD_CLOCK, run, masks, probs, routeMask: { m, p }, arrival }
-  cache.set(terrain, model)
+  const model: TownSpreadModel = { run, masks, probs, routeMask: { m, p }, arrival }
+  cache.set(run, model)
   return model
 }
 
-/** Pixel window (inclusive-exclusive) around a town and its km-per-cell scale. */
-function windowOf(terrain: Terrain, town: Town) {
+export type Reach = {
+  kmLat: number; kmLng: number
+  /** Village cell. */
+  vc: number; vr: number
+  /** Bounding box of the reach (inclusive-exclusive). */
+  c0: number; c1: number; r0: number; r1: number
+  /** True when cell i lies on the river reach that affects the town. */
+  has: (i: number) => boolean
+}
+const reachCache = new WeakMap<Terrain, Map<string, Reach>>()
+
+/** The river reach (cells within REACH_HALF_KM of the village chainage) and its bounding box. */
+export function windowOf(terrain: Terrain, town: Town): Reach {
+  let byTown = reachCache.get(terrain)
+  if (!byTown) { byTown = new Map(); reachCache.set(terrain, byTown) }
+  const key = `${town.id}:${town.ch}`
+  const hit = byTown.get(key)
+  if (hit) return hit
   const kmLat = terrain.res * KM_PER_DEG, kmLng = kmLat * Math.cos((town.lat * Math.PI) / 180)
-  const half = Math.ceil(SPREAD_RADIUS_KM / kmLat)
-  const vc = Math.floor((town.lng - terrain.w) / terrain.res), vr = Math.floor((terrain.n - town.lat) / terrain.res)
-  return { kmLat, kmLng, vc, vr, c0: Math.max(0, vc - half), c1: Math.min(terrain.cols, vc + half + 1), r0: Math.max(0, vr - half), r1: Math.min(terrain.rows, vr + half + 1) }
+  const has = (i: number) => terrain.code[i] !== 255 && Math.abs(terrain.ch[i] * 2 - town.ch) <= REACH_HALF_KM
+  let c0 = terrain.cols, c1 = 0, r0 = terrain.rows, r1 = 0
+  for (let r = 0; r < terrain.rows; r++) for (let c = 0; c < terrain.cols; c++) {
+    if (!has(r * terrain.cols + c)) continue
+    if (c < c0) c0 = c
+    if (c >= c1) c1 = c + 1
+    if (r < r0) r0 = r
+    if (r >= r1) r1 = r + 1
+  }
+  const reach: Reach = {
+    kmLat, kmLng, has,
+    vc: Math.floor((town.lng - terrain.w) / terrain.res), vr: Math.floor((terrain.n - town.lat) / terrain.res),
+    c0: Math.min(c0, c1), c1, r0: Math.min(r0, r1), r1,
+  }
+  byTown.set(key, reach)
+  return reach
 }
 
 export function townFacts(model: TownSpreadModel, terrain: Terrain, town: Town, h: number): TownFacts {
@@ -109,8 +137,8 @@ export function townFacts(model: TownSpreadModel, terrain: Terrain, town: Town, 
   let normal = 0, extra = 0, extraNow = 0, land2 = 0, wet2 = 0, riverKm = Infinity, waterKm = Infinity, maxHand = -Infinity, probSum = 0
   for (let r = w.r0; r < w.r1; r++) for (let c = w.c0; c < w.c1; c++) {
     const i = r * terrain.cols + c
+    if (!w.has(i)) continue
     const dist = Math.hypot((c - w.vc) * w.kmLng, (r - w.vr) * w.kmLat)
-    if (dist > SPREAD_RADIUS_KM || terrain.code[i] === 255) continue
     const m = mask[i]
     if (m === 2) { normal++; riverKm = Math.min(riverKm, dist) }
     else {
@@ -124,7 +152,7 @@ export function townFacts(model: TownSpreadModel, terrain: Terrain, town: Town, 
     if (now[i] === 1) extraNow++
   }
   return {
-    horizon: h, radiusKm: SPREAD_RADIUS_KM,
+    horizon: h, reachKm: REACH_HALF_KM * 2,
     normalKm2: Math.round(normal * area * 10) / 10, extraKm2: Math.round(extra * area * 10) / 10, growthKm2: Math.round(Math.max(0, extra - extraNow) * area * 10) / 10,
     share2km: land2 ? wet2 / land2 : 0, reached: waterKm <= REACH_KM,
     riverKm: Number.isFinite(riverKm) ? Math.round(riverKm * 10) / 10 : null, waterKm: Number.isFinite(waterKm) ? Math.round(waterKm * 10) / 10 : null,
@@ -134,26 +162,16 @@ export function townFacts(model: TownSpreadModel, terrain: Terrain, town: Town, 
 }
 
 const NORMAL: [number, number, number, number] = [37, 99, 235, 235]
-const EXTRA_NOW: [number, number, number, number] = [251, 146, 60, 185]
-const EXTRA_NEW: [number, number, number, number] = [220, 38, 38, 205]
-const EDGE: [number, number, number, number] = [127, 29, 29, 255]
 
-/** Image of the window around a town: normal river in blue, extra flood water in orange, water new since NOW in red. */
+/** Image of the reach around a town showing the normal river channel in blue. */
 export function townImage(model: TownSpreadModel, terrain: Terrain, town: Town, h: number) {
-  const w = windowOf(terrain, town), mask = model.masks[h] ?? model.masks[0], now = model.masks[0]
-  const W = w.c1 - w.c0, Hh = w.r1 - w.r0, img = new ImageData(W, Hh)
+  const w = windowOf(terrain, town), mask = model.masks[h] ?? model.masks[0]
+  const W = Math.max(1, w.c1 - w.c0), Hh = Math.max(1, w.r1 - w.r0), img = new ImageData(W, Hh)
   for (let r = w.r0; r < w.r1; r++) for (let c = w.c0; c < w.c1; c++) {
-    const i = r * terrain.cols + c, m = mask[i]
-    if (m === 0 || terrain.code[i] === 255) continue
-    if (Math.hypot((c - w.vc) * w.kmLng, (r - w.vr) * w.kmLat) > SPREAD_RADIUS_KM) continue
-    let col = NORMAL
-    if (m === 1) {
-      col = h === 0 || now[i] === 1 ? EXTRA_NOW : EXTRA_NEW
-      const edge = (c > 0 && mask[i - 1] === 0) || (c < terrain.cols - 1 && mask[i + 1] === 0) || (r > 0 && mask[i - terrain.cols] === 0) || (r < terrain.rows - 1 && mask[i + terrain.cols] === 0)
-      if (edge) col = EDGE
-    }
+    const i = r * terrain.cols + c
+    if (mask[i] !== 2 || !w.has(i)) continue   // the flood itself is drawn as a polygon; this image is only the normal river channel
     const p = ((r - w.r0) * W + (c - w.c0)) * 4
-    img.data[p] = col[0]; img.data[p + 1] = col[1]; img.data[p + 2] = col[2]; img.data[p + 3] = col[3]
+    img.data[p] = NORMAL[0]; img.data[p + 1] = NORMAL[1]; img.data[p + 2] = NORMAL[2]; img.data[p + 3] = NORMAL[3]
   }
   const canvas = document.createElement('canvas'); canvas.width = W; canvas.height = Hh
   canvas.getContext('2d')!.putImageData(img, 0, 0)

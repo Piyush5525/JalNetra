@@ -14,14 +14,19 @@ const { classify } = await import(pathToFileURL(join(root, 'aws-api', 'dist', 'm
 const points = JSON.parse(readFileSync(join(root, 'aws-api', 'data', 'rivers.json'), 'utf8')).points
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
-export const state = { snapshot: null, running: false, lastRunAt: null, lastOkAt: null, nextRunAt: null, lastError: '', runs: 0, intervalMin: 15, durationSec: null }
+export const state = { dailyLimit: false, snapshot: null, running: false, lastRunAt: null, lastOkAt: null, nextRunAt: null, lastError: '', runs: 0, intervalMin: 15, durationSec: null }
 
 try { if (existsSync(FILE)) { state.snapshot = JSON.parse(readFileSync(FILE, 'utf8')); state.lastOkAt = state.snapshot.river?.created_at ?? null } } catch { /* start empty */ }
 
 async function fetchBatch(batch) {
   const url = `https://flood-api.open-meteo.com/v1/flood?latitude=${batch.map(p => p.glat).join(',')}&longitude=${batch.map(p => p.glng).join(',')}&daily=river_discharge&past_days=3&forecast_days=8`
   const res = await fetch(url, { signal: AbortSignal.timeout(30_000) })
-  if (res.status === 429) throw Object.assign(new Error('Open-Meteo rate limit (429)'), { rateLimited: true })
+  if (res.status === 429) {
+    // "Daily API request limit exceeded" will not clear in a minute: stop at once and wait for the quota reset (00:00 UTC).
+    const text = await res.text().catch(() => '')
+    if (/daily/i.test(text)) throw Object.assign(new Error('Open-Meteo daily limit reached; resumes after 00:00 UTC'), { dailyLimit: true })
+    throw Object.assign(new Error('Open-Meteo rate limit (429)'), { rateLimited: true })
+  }
   if (!res.ok) throw new Error(`Open-Meteo HTTP ${res.status}`)
   const body = await res.json()
   return Array.isArray(body) ? body : [body]
@@ -51,7 +56,10 @@ export async function runOnce(log = console.log) {
           if (!d?.time || !d.river_discharge || d.time.length !== d.river_discharge.length || d.time.indexOf(todayIso) < 0) { failed++; return }
           rows.push(classify(p, d.time, d.river_discharge, todayIso))
         })
-      } catch (e) { log('monitor: batch failed', i, String(e.message || e)); failed += batch.length }
+      } catch (e) {
+        if (e.dailyLimit) throw e
+        log('monitor: batch failed', i, String(e.message || e)); failed += batch.length
+      }
     }
     // a batch can fail on a network blip: retry the missing points twice, then reuse their row from the previous snapshot
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -69,7 +77,7 @@ export async function runOnce(log = console.log) {
             const d = raw[k]?.daily
             if (d?.time && d.river_discharge && d.time.length === d.river_discharge.length && d.time.indexOf(todayIso) >= 0) { rows.push(classify(p, d.time, d.river_discharge, todayIso)); failed-- }
           })
-        } catch (e) { log('monitor: retry failed', String(e.message || e)) }
+        } catch (e) { if (e.dailyLimit) throw e; log('monitor: retry failed', String(e.message || e)) }
       }
     }
     {
@@ -100,6 +108,7 @@ export async function runOnce(log = console.log) {
     log(`monitor: ${rows.length}/${points.length} points · ${headline} · N${by.NORMAL} R${by.RISING} W${by.WARNING} D${by.DANGER} · ${failed} failed`)
   } catch (e) {
     state.lastError = String(e.message || e)
+    state.dailyLimit = !!e.dailyLimit
     log('monitor: run failed:', state.lastError)
   } finally {
     state.running = false
@@ -111,14 +120,20 @@ export async function runOnce(log = console.log) {
 
 export function startMonitor(intervalMin = 15, log = console.log) {
   state.intervalMin = intervalMin
+  const schedule = (waitMs) => { state.nextRunAt = new Date(Date.now() + waitMs).toISOString(); setTimeout(loop, waitMs) }
   const loop = async () => {
     await runOnce(log)
-    // a failed run is retried sooner (5 min) so a rate limit does not leave the data stale for a whole interval
-    const wait = state.lastError ? Math.min(5, intervalMin) : intervalMin
-    state.nextRunAt = new Date(Date.now() + wait * 60_000).toISOString()
-    setTimeout(loop, wait * 60_000)
+    // A failed run is retried sooner (5 min), except a daily-quota failure, which waits for the reset at 00:00 UTC.
+    // Every location costs quota, so the interval (default 3 h locally) is what keeps a day under the free limit.
+    if (state.dailyLimit) {
+      const reset = new Date(); reset.setUTCHours(24, 5, 0, 0)
+      schedule(reset.getTime() - Date.now())
+    } else schedule((state.lastError ? Math.min(5, intervalMin) : intervalMin) * 60_000)
   }
-  void loop()
+  // A restart must not burn quota: if the saved snapshot is still fresh, wait out the rest of the interval first.
+  const age = state.lastOkAt ? Date.now() - Date.parse(state.lastOkAt) : Infinity
+  if (age < intervalMin * 60_000) schedule(intervalMin * 60_000 - age)
+  else void loop()
 }
 
 export const publicStatus = () => ({

@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { publicStatus, runOnce, startMonitor, state as monitorState } from './monitor.mjs'
+import { createEscalation } from './escalation.mjs'
 import { PGlite } from '@electric-sql/pglite'
 import { PGLiteSocketServer } from '@electric-sql/pglite-socket'
 
@@ -15,8 +16,10 @@ for (const f of [join(root, '..', '.env'), join(root, '.env')]) {
   try { for (const l of readFileSync(f, 'utf8').split(/\r?\n/)) { const m = l.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/); if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '') } } catch {}
 }
 const E = process.env
+E.JN_PROXY_CACHE_FILE ||= join(here, 'data', 'proxy-cache.json')
 // .env names -> names the handler reads. The demo phone is the number from .env, never one stored in AWS.
-E.JN_ALERT_PHONE = E.DEMO_PHONE_NUMBER || E.ALERT_PHONE_NUMBER
+// Stage 1 of the exercise escalation goes to the Sarpanch (ALERT_PHONE_NUMBER1); stage 2 (citizens) uses ALERT_PHONE_NUMBER2.
+E.JN_ALERT_PHONE = E.ALERT_PHONE_NUMBER1 || E.DEMO_PHONE_NUMBER || E.ALERT_PHONE_NUMBER
 // The flood-alert voice agent (created in Omnidim for JalNetra: speaks alert_message, Hindi then English). The older
 // women's-safety agent in .env says "check Telegram" and ignores the message, so it is not used here.
 E.OMNIDIM_AGENT = E.FLOOD_AGENT_ID || '269919'
@@ -32,6 +35,13 @@ Object.assign(E, { PGHOST: '127.0.0.1', PGPORT: String(dbPort), PGDATABASE: 'pos
 
 const { handler } = await import(pathToFileURL(join(root, 'aws-api', 'dist', 'handler.js')).href)
 const port = Number(E.LOCAL_BACKEND_PORT || 8787)
+const { dispatchAlert, dispatchRefs } = await import(pathToFileURL(join(root, 'aws-api', 'dist', 'telephony.js')).href)
+const escalation = createEscalation({
+  env: E, dispatch: dispatchAlert, file: join(here, 'data', 'escalations.json'), dryRun: E.ESCALATION_DRY_RUN === '1',
+  log: (...a) => console.log(new Date().toISOString().slice(11, 19), 'escalation:', ...a),
+  requestIdFor: r => dispatchRefs.get(`demo-${r.alertId}`) ?? null,
+})
+escalation.resumePending()
 // ---- Listen in Hindi: local text-to-speech (Microsoft Edge neural voice). Replaces Amazon Polly; no AWS involved. ----
 const audio = new Map()   // id -> mp3 Buffer
 function synthesize(text, voice) {
@@ -103,8 +113,34 @@ createServer(async (req, res) => {
       return sendJson(res, 200, { url: `/jn/audio/${id}.mp3`, voice, cached, characters: text.length })
     } catch (e) { console.error('tts failed', e); return sendJson(res, 502, { error: 'Speech synthesis is unavailable right now. Try again shortly.' }) }
   }
+  // ---- Two-stage escalation: Sarpanch (number 1) decides, then citizens (number 2) are called ----
+  {
+    const m = u.pathname.match(/^\/escalation\/([0-9a-f-]{36})$/)
+    if (req.method === 'GET' && m) { const v = escalation.status(m[1]); return v ? sendJson(res, 200, v) : sendJson(res, 404, { error: 'Not found' }) }
+    const a = u.pathname.match(/^\/escalation\/by-alert\/([0-9a-f-]{36})\/([0-9a-f-]{36})$/)
+    if (req.method === 'GET' && a) { const v = escalation.statusByAlert(a[1], a[2]); return v ? sendJson(res, 200, v) : sendJson(res, 404, { error: 'Not found' }) }
+    if (req.method === 'POST' && u.pathname === '/escalation/call-result') {
+      let raw = ''; for await (const c of req) { raw += c; if (raw.length > 8000) break }
+      let b = {}; try { b = JSON.parse(raw || '{}') } catch {}
+      const token = String(req.headers['x-escalation-token'] ?? b.token ?? '')
+      const out = await escalation.callResult(b, token)
+      return sendJson(res, out.status, out.body)
+    }
+  }
   const chunks = []; for await (const c of req) chunks.push(c)
-  const url = new URL(req.url, 'http://x'), body = Buffer.concat(chunks).toString('utf8')
+  const url = new URL(req.url, 'http://x')
+  let body = Buffer.concat(chunks).toString('utf8')
+  // The page may attach the stage-2 (citizen) message to an approval. It is not part of the demo API contract, so strip it here.
+  let citizen = null
+  const approve = req.method === 'POST' ? url.pathname.match(/^\/demo\/sessions\/([0-9a-f-]{36})\/alerts\/([0-9a-f-]{36})\/approve$/) : null
+  if (approve) {
+    try {
+      const b = JSON.parse(body || '{}')
+      if (b.citizenMessageHi || b.citizenMessageEn) citizen = { hi: b.citizenMessageHi, en: b.citizenMessageEn }
+      delete b.citizenMessageHi; delete b.citizenMessageEn
+      body = JSON.stringify(b)
+    } catch { /* the handler will reject a malformed body */ }
+  }
   const event = {
     version: '2.0', rawPath: url.pathname, rawQueryString: url.search.slice(1), headers: Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, String(v)])),
     queryStringParameters: Object.fromEntries(url.searchParams), body: body || undefined, isBase64Encoded: false,
@@ -112,9 +148,20 @@ createServer(async (req, res) => {
   }
   try {
     const r = await handler(event, {}, () => {})
+    // Stage 1 succeeded (the real call to the Sarpanch was dispatched): open the escalation and ask for the Sarpanch's decision.
+    if (approve && r.statusCode === 200) {
+      try {
+        const out = JSON.parse(r.body ?? '{}')
+        const al = out.alert
+        if (out.replayed === false && al?.callStatus === 'dispatched') {
+          void escalation.open({ sessionId: approve[1], alertId: approve[2], village: al.prediction?.villageName, district: al.prediction?.district, horizonHours: al.prediction?.horizonHours ?? null, stage1Status: 'dispatched', citizen })
+            .catch(e => console.error('escalation open failed', e))
+        }
+      } catch { /* not JSON */ }
+    }
     res.writeHead(r.statusCode ?? 200, r.headers ?? {}); res.end(r.body ?? '')
   } catch (e) { console.error(e); res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: String(e.message || e) })) }
-}).listen(port, '127.0.0.1', () => console.log(`local backend on http://127.0.0.1:${port}; demo phone ends ${String(E.JN_ALERT_PHONE).slice(-4)}`))
+}).listen(port, '127.0.0.1', () => console.log(`local backend on http://127.0.0.1:${port}; sarpanch phone ends ${String(E.JN_ALERT_PHONE).slice(-4)}, citizen phone ends ${String(E.ALERT_PHONE_NUMBER2 ?? '').slice(-4)}`))
 
-// ---- the scheduled job, run locally: every MONITOR_INTERVAL_MIN (default 15) minutes ----
-startMonitor(Number(E.MONITOR_INTERVAL_MIN || 15), (...a) => console.log(new Date().toISOString().slice(11, 19), ...a))
+// ---- the scheduled job, run locally: every MONITOR_INTERVAL_MIN (default 180) minutes ----
+startMonitor(Number(E.MONITOR_INTERVAL_MIN || 180), (...a) => console.log(new Date().toISOString().slice(11, 19), ...a))

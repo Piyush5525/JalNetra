@@ -95,8 +95,8 @@ export async function getSession(id: string, signal?: AbortSignal) {
   if (session.id !== id) throw new DemoApiError('Session identity mismatch. Approval is unavailable.', 0, 'INVALID_RESPONSE')
   return session
 }
-export async function approveAlert(sessionId: string, alertId: string, requestId: string, forecastHorizonHours: Horizon, spoken?: { hi: string; en: string }): Promise<DemoApprovalResult> {
-  const result = await request(`/demo/sessions/${encodeURIComponent(sessionId)}/alerts/${encodeURIComponent(alertId)}/approve`, { body: { requestId, forecastHorizonHours, ...(spoken ? { callMessageHi: spoken.hi, callMessageEn: spoken.en } : {}) } })
+export async function approveAlert(sessionId: string, alertId: string, requestId: string, forecastHorizonHours: Horizon, spoken?: { hi: string; en: string }, citizen?: { hi: string; en: string }): Promise<DemoApprovalResult> {
+  const result = await request(`/demo/sessions/${encodeURIComponent(sessionId)}/alerts/${encodeURIComponent(alertId)}/approve`, { body: { requestId, forecastHorizonHours, ...(spoken ? { callMessageHi: spoken.hi, callMessageEn: spoken.en } : {}), ...(citizen ? { citizenMessageHi: citizen.hi, citizenMessageEn: citizen.en } : {}) } })
   if (!object(result) || typeof result.replayed !== 'boolean' || !alert(result.alert) || result.alert.id !== alertId || result.alert.approvalStatus !== 'approved' || result.alert.prediction.horizonHours !== forecastHorizonHours || !object(result.session) || !allowance(result.session.allowance)) throw new DemoApiError('Approval response could not be verified. Reconcile this session before proceeding.', 0, 'INVALID_RESPONSE', 0, true)
   return result as unknown as DemoApprovalResult
 }
@@ -104,4 +104,28 @@ export async function getPublicFeed(id: string, signal?: AbortSignal) {
   const feed = validatePublicFeed(await request(`/demo/public/${encodeURIComponent(id)}`, { anonymous: true, signal }))
   if (feed.sessionId !== id) throw new DemoApiError('Public feed identity mismatch.', 0, 'INVALID_RESPONSE')
   return feed
+}
+
+export type EscalationStatus = 'awaiting_sarpanch' | 'escalating' | 'escalated' | 'rejected' | 'expired' | 'failed'
+export interface EscalationEvent { at: string; text: string; kind: 'info' | 'ok' | 'warn' }
+export interface EscalationView {
+  id: string
+  status: EscalationStatus
+  village: string
+  district: string
+  expiresAt: string
+  decidedVia: string | null
+  acknowledged: boolean
+  sarpanch: { phone: string | null; call: { status: string } }
+  citizen: { phone: string | null; call: { status: string; note: string | null } | null }
+  channels: { telegram: boolean; callWebhook: boolean }
+  citizenMessage: { hi: string | null; en: string | null }
+  events: EscalationEvent[]
+}
+/** Two-stage escalation state for an approved exercise alert (null until the server has opened it). */
+export async function getEscalation(sessionId: string, alertId: string, signal?: AbortSignal): Promise<EscalationView | null> {
+  const response = await fetch(`${API}/escalation/by-alert/${encodeURIComponent(sessionId)}/${encodeURIComponent(alertId)}`, { cache: 'no-store', signal })
+  if (response.status === 404) return null
+  if (!response.ok) throw new Error(`Escalation status unavailable (HTTP ${response.status})`)
+  return await response.json() as EscalationView
 }

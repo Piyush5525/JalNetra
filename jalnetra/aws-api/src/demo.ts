@@ -341,13 +341,13 @@ export function createDemoApi(deps: DemoDeps) {
           spoken ?? messageHi(scenario),
           {
             place: `${scenario.villageName}, ${scenario.district}`,
-            title: alertTitle(scenario),
-            source: "JalNetra exercise on replayed 2026 data (not a real warning)",
-            observed: "Exercise",
-            safe_place: "nearest school or panchayat building on high ground (exercise)",
+            title: `${scenario.villageName} flood alert`,
+            source: "JalNetra flood model",
+            observed: "Flood forecast",
+            safe_place: "nearest school or panchayat building on high ground",
           },
           `demo-${row.id}`,
-          { timeoutMs: PROVIDER_TIMEOUT_MS },
+          { timeoutMs: PROVIDER_TIMEOUT_MS, agentId: telephonyConfig().sarpanchAgent },
         );
         status = result.status === "sent" ? "dispatched" : result.status === "failed" ? "failed" : result.status === "not_configured" ? "not_configured" : "unknown";
         providerRef = result.providerRef;

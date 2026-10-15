@@ -24,3 +24,6 @@ dist-ssr
 *.sw?
 .env
 TEAM_KEYS.txt
+
+local-backend/data/proxy-cache.json
+local-backend/data/escalations.json
