@@ -5,7 +5,7 @@ import { BitmapLayer, GeoJsonLayer, PathLayer, ScatterplotLayer, TextLayer } fro
 import { PathStyleExtension } from '@deck.gl/extensions'
 import { TileLayer } from '@deck.gl/geo-layers'
 import gsap from 'gsap'
-import { FiMoreHorizontal, FiPause, FiPlay, FiRefreshCw, FiSkipForward, FiLayers, FiCheckCircle, FiX, FiChevronDown, FiChevronRight, FiPhoneCall, FiExternalLink, FiAlertTriangle, FiRotateCcw, FiSend, FiCamera, FiCopy } from 'react-icons/fi'
+import { FiMoreHorizontal, FiPause, FiPlay, FiRefreshCw, FiSkipForward, FiLayers, FiCheckCircle, FiX, FiChevronDown, FiChevronRight, FiChevronLeft, FiPhoneCall, FiExternalLink, FiAlertTriangle, FiRotateCcw, FiSend, FiCamera, FiCopy } from 'react-icons/fi'
 import D from '../data.json'
 import s2 from '../img/s2.jpg'
 import o1 from '../img/o1.png'
@@ -118,9 +118,7 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
   const [terrain, setTerrain] = useState<Terrain | null>(null)
   const [run, setRun] = useState<ModelRun | null>(null)
   const [err, setErr] = useState<string | null>(null)
-  const [lastAt, setLastAt] = useState<number | null>(null)
   const [nextAt, setNextAt] = useState<number>(Date.now())
-  const [clock, setClock] = useState(Date.now())
   const [sim, setSim] = useState(DEMO_START)
   const [paused, setPaused] = useState(false)
   const [period, setPeriod] = useState(30)
@@ -137,6 +135,8 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
   const [mapView, setMapView] = useState<'current' | '2d' | '3d'>('current')
   const [photo, setPhoto] = useState(false)
   const [detail, setDetail] = useState(false)
+  const [showLeftPanel, setShowLeftPanel] = useState(false)
+  const [showRightPanel, setShowRightPanel] = useState(false)
   const [running, setRunning] = useState(false)
   const prev = useRef<ModelRun | null>(null)
   const pipeRef = useRef<HTMLDivElement>(null)
@@ -145,15 +145,13 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
   useEffect(() => { if (!topRef.current) return; const ro = new ResizeObserver(e => setTopH(Math.round(e[0].contentRect.height))); ro.observe(topRef.current); return () => ro.disconnect() }, [])
 
   useEffect(() => { loadTerrain(M).then(setTerrain).catch(e => setErr('Terrain grid failed to load: ' + e)) }, [])
-  useEffect(() => { const id = setInterval(() => setClock(Date.now()), 1000); return () => clearInterval(id) }, [])
-
   // ---- the monitoring loop: fetch inputs, run the model, diff against the previous run
   const doRun = async (simNow?: number) => {
     setRunning(true)
     try {
       const inp = mode === 'live' ? await liveInputs(M) : eventInputs(M, simNow ?? sim)
       const r = runModel(M, inp)
-      setRun(r); setErr(null); setLastAt(Date.now())
+      setRun(r); setErr(null)
       diff(prev.current, r); prev.current = r
     } catch (e) { setErr(`Live sources unreachable (${(e as Error).message}). No prediction shown rather than a guess. Try the demo simulation.`) }
     finally { setRunning(false); setNextAt(Date.now() + (mode === 'live' ? LIVE_EVERY : period * 1000)) }
@@ -230,16 +228,12 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
   const atRiskH = counts.MEDIUM + counts.HIGH + counts.CRITICAL
   const queue = useMemo(() => [...(run?.villages ?? []), ...exercise].filter(v => (v.level === 'HIGH' || v.level === 'CRITICAL') && alerts[v.id]?.stage !== 'dismissed').sort((a, b) => (a.level === b.level ? (a.impactH ?? 99) - (b.impactH ?? 99) : a.level === 'CRITICAL' ? -1 : 1)), [run, alerts, exercise])
   const selR = sel ? risk.get(sel) ?? null : null
-  const mediumNow = run?.counts[h]?.MEDIUM ?? 0
-  const highRiver = india.summary ? india.summary.by.DANGER + india.summary.by.WARNING : 0
-  const risingRivers = india.summary ? india.summary.alert.length : 0
-  const queueStatus = { gandakMedium: mediumNow, gandakHigh: queue.filter(q => !exerciseIds.has(q.id)).length, indiaHigh: highRiver, indiaRising: risingRivers, indiaReady: !!india.summary }
   const anyApproved = Object.values(alerts).some(a => mode === 'demo' ? ['calling', 'contacted', 'evacuating', 'resolved'].includes(a.stage) : a.approved)
   const anyContacted = Object.values(alerts).some(a => ['contacted', 'evacuating', 'resolved'].includes(a.stage))
   const anyIncident = Object.values(alerts).some(a => a.incident)
   const fly = (lng: number, lat: number, zoom = 10.4, pitch = 0, bearing = 0) => setView(v => ({ ...v, longitude: lng, latitude: lat, zoom, pitch, bearing, transitionDuration: 1400, transitionInterpolator: new FlyToInterpolator({ speed: 1.4 }) }))
   // Selecting a village tilts the map so the evacuation route reads in 3D; closing it levels the camera again.
-  const pick = (id: number) => { setSel(id); const v = VBY.get(id)!; fly(v.lng, v.lat, 11, 55, -18) }
+  const pick = (id: number) => { setSel(id); setShowRightPanel(true); const v = VBY.get(id)!; fly(v.lng, v.lat, 11, 55, -18) }
   const closeSel = () => { setSel(null); setView(v => ({ ...v, pitch: 0, bearing: 0, transitionDuration: 900, transitionInterpolator: new FlyToInterpolator({ speed: 1.4 }) })) }
 
   // ---- map layers
@@ -366,10 +360,6 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
     if ((view.zoom ?? 0) >= 5.8) L.push(new TextLayer({ id: 'st-t', data: declutter(sd, d => [d.lng, d.lat], () => 1, 150, 26), getPosition: (d: any) => [d.lng, d.lat], getText: (d: any) => d.label.replace(' barrage', '').replace(', Nepal', ''), getSize: 13, getPixelOffset: [11, 0], getTextAnchor: 'start', ...LABEL, updateTriggers: { getText: [run.now, h] } }))
   }
 
-  const secs = Math.max(0, Math.round((nextAt - clock) / 1000))
-  const simLabel = mode === 'demo' ? fmtIST(sim) : null
-  const hzWord = h === 0 ? 'right now' : `in the next ${h} hours`
-  const statusText = run ? `Gandak village model: river ${run.river.toLowerCase()}. ${atRiskH ? `${atRiskH} village${atRiskH === 1 ? '' : 's'} at risk ${hzWord}.` : `No village at risk ${hzWord}.`}${queue.length ? ` ${queue.length} ${mode === 'demo' ? 'simulated ' : queue.every(q => exerciseIds.has(q.id)) ? 'exercise ' : ''}alert${queue.length === 1 ? '' : 's'} in the review queue.` : ''}` : ''
   const tick = (k: keyof typeof layers) => setLayers(s => ({ ...s, [k]: !s[k] }))
 
   return (
@@ -392,19 +382,7 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
         <section className="lv-card">
           <div className="lv-head">
             <AppBrand onClick={onHome} />
-            <div className="lv-name"><div className="lv-title">Live · India rivers + Gandak villages</div><div className="lv-sub">{mode === 'demo' ? 'Replaying the September 2026 flood' : 'River network across India · village model for Nepal to Bihar (291 villages)'}</div></div>
           </div>
-          {run ? <>
-            <p className="lv-status"><i className={'lv-dot ' + (atRiskH || run.river.startsWith('Rising') ? 'warn' : 'ok')} />{statusText}</p>
-            {run && (() => {
-              let top: { name: string; p: number } | null = null, atRisk = 0
-              for (const v of VILLAGES) { if (exerciseIds.has(v.id)) continue; const rk = risk.get(v.id); if (!rk) continue; const pp = rk.pAt[h] ?? 0; if (!top || pp > top.p) top = { name: v.name, p: pp }; if ((rk.levelAt[h] ?? 'LOW') !== 'LOW') atRisk++ }
-              return top ? <p className="lv-meta"><span>At {HLABEL[h]}: highest flood probability of the {VILLAGES.length - exerciseIds.size} Gandak villages is <b>{Math.round(top.p * 100)}%</b> ({top.name}) · {atRisk} above low risk · Gandak flow {fmtQ(run.stations[run.stations.length - 1].q[72 + h])} m³/s at the last station</span></p> : null
-            })()}
-            {mode === 'live' && india.summary && <p className="lv-meta">India rivers: {india.summary.headline.toLowerCase()}.</p>}
-            <p className="lv-meta">{mode === 'demo' ? `${simLabel}${paused ? ' · paused' : ` · next step in ${secs}s`}` : `Gandak model run ${lastAt ? fmtIST(lastAt, false) : '…'} · re-runs in ${secs >= 60 ? `${Math.floor(secs / 60)} min` : `${secs}s`} (river inputs update daily)`}</p>
-          </> : !err && <p className="lv-meta"><FiRefreshCw className="spin" /> Reading river data…</p>}
-          {mode === 'demo' && <p className="note">Client-only simulation. No incidents are created, no calls are placed, and no notifications are sent.</p>}
         </section>
           <div className="lv-actions">
           <div className="lv-more">
@@ -440,8 +418,15 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
       {err && <div className="lerr"><FiAlertTriangle /> {err}</div>}
       {!run && !err && <div className="lerr info"><FiRefreshCw className="spin" /> Fetching river and rain data, running the model…</div>}
 
+      <button className={'rail-toggle rail-toggle-left' + (showLeftPanel ? ' open' : '')} onClick={() => setShowLeftPanel(v => !v)} aria-expanded={showLeftPanel} aria-controls="live-left-panel">
+        {showLeftPanel ? <FiChevronLeft /> : <FiChevronRight />}<span>{showLeftPanel ? 'Hide rivers' : 'Rivers'}</span>
+      </button>
+      <button className={'rail-toggle rail-toggle-right' + (showRightPanel ? ' open' : '')} onClick={() => setShowRightPanel(v => !v)} aria-expanded={showRightPanel} aria-controls="live-right-panel">
+        <span>{showRightPanel ? 'Hide alerts' : 'Alerts'}</span>{showRightPanel ? <FiChevronRight /> : <FiChevronLeft />}
+      </button>
+
       {/* ---------- left: forecast + inputs + impact timeline ---------- */}
-      {(run || india.data) && <aside className="lpanel left">
+      {(run || india.data) && <aside id="live-left-panel" className={'lpanel left' + (showLeftPanel ? ' panel-visible' : ' panel-hidden')}>
         <IndiaCard india={india} sel={indiaSel} onSelect={id => { setIndiaSel(id); const p = india.points.get(id); if (p) setView(v => ({ ...v, longitude: p.lng, latitude: p.lat, zoom: Math.max(v.zoom ?? 0, 8), pitch: 0, bearing: 0, transitionDuration: 1200, transitionInterpolator: new FlyToInterpolator({ speed: 1.4 }) })) }} onClear={() => setIndiaSel(null)} />
         {run && detail && <>
         <Forecast run={run} />
@@ -462,9 +447,9 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
       </aside>}
 
       {/* ---------- right: alert queue or village ---------- */}
-      {run && (selR || queue.length > 0 || detail) && <aside className="lpanel right">
+      {run && (selR || queue.length > 0 || detail) && <aside id="live-right-panel" className={'lpanel right' + (showRightPanel ? ' panel-visible' : ' panel-hidden')}>
         {selR ? <VillagePanel r={selR} route={routes.get(selR.id) ?? null} run={run} mode={mode} h={h} st={alerts[selR.id]} setSt={s => setAlerts(a => ({ ...a, [selR.id]: { ...(a[selR.id] ?? {}), ...s } as AlertState }))} onClose={closeSel} onOpenIncident={onOpenIncident} exercise={exerciseIds.has(selR.id)} googleDrive={gDrive} realInfo={real} townInfo={townInfo} />
-          : <AlertQueue status={queueStatus} exerciseIds={exerciseIds} queue={queue} alerts={alerts} onView={pick} onDismiss={id => setAlerts(a => ({ ...a, [id]: { stage: 'dismissed' } }))} onOpenIncident={onOpenIncident} mode={mode} />}
+          : <AlertQueue exerciseIds={exerciseIds} queue={queue} alerts={alerts} onView={pick} onDismiss={id => setAlerts(a => ({ ...a, [id]: { stage: 'dismissed' } }))} onOpenIncident={onOpenIncident} mode={mode} />}
         {stats && detail && <section>
           <div className="kicker">Potentially affected at {HLABEL[h]}</div>
           <dl className="kv small">
@@ -609,8 +594,7 @@ function ImpactTimeline({ run, onPick, sel }: { run: ModelRun; onPick: (id: numb
   )
 }
 
-type QueueStatus = { gandakMedium: number; gandakHigh: number; indiaHigh: number; indiaRising: number; indiaReady: boolean }
-function AlertQueue({ status, exerciseIds, queue, alerts, onView, onDismiss, onOpenIncident, mode }: { status: QueueStatus; exerciseIds: Set<number>; queue: VillageRisk[]; alerts: Record<number, AlertState>; onView: (id: number) => void; onDismiss: (id: number) => void; onOpenIncident: (id: string) => void; mode: Mode }) {
+function AlertQueue({ exerciseIds, queue, alerts, onView, onDismiss, onOpenIncident, mode }: { exerciseIds: Set<number>; queue: VillageRisk[]; alerts: Record<number, AlertState>; onView: (id: number) => void; onDismiss: (id: number) => void; onOpenIncident: (id: string) => void; mode: Mode }) {
   const real = queue.filter(q => !exerciseIds.has(q.id)), practice = queue.filter(q => exerciseIds.has(q.id))
   const spot = (e: React.MouseEvent<HTMLLIElement>) => { const b = e.currentTarget.getBoundingClientRect(); e.currentTarget.style.setProperty('--mx', `${e.clientX - b.left}px`); e.currentTarget.style.setProperty('--my', `${e.clientY - b.top}px`) }
   const card = (r: VillageRisk, i: number) => {
@@ -628,16 +612,11 @@ function AlertQueue({ status, exerciseIds, queue, alerts, onView, onDismiss, onO
       </li>
     )
   }
-  const tone = (n: number, bad: boolean) => (n === 0 ? 'ok' : bad ? 'warn' : 'mid')
   return (
-    <section className="queue">
-      <div className="queue-head"><span className="kicker live">Alerts</span><span className="queue-count">{real.length} live · {practice.length} exercise</span></div>
-      <div className="queue-now" aria-label="Live data right now">
-        <div><span>Gandak villages</span><b className={tone(status.gandakHigh, true)}>{status.gandakHigh ? `${status.gandakHigh} at HIGH or above` : status.gandakMedium ? `${status.gandakMedium} at MEDIUM, none HIGH` : 'No village at risk'}</b></div>
-        <div><span>India rivers</span><b className={tone(status.indiaRising, true)}>{!status.indiaReady ? 'Loading…' : status.indiaRising ? `${status.indiaRising} rising to flood levels` : `None rising · ${status.indiaHigh} high but falling`}</b></div>
-      </div>
+      <section className="queue">
+       <div className="queue-head"><span className="kicker live">Alerts</span><span className="queue-count">{real.length} live · {practice.length} exercise</span></div>
 
-      <div className="queue-sec">
+       <div className="queue-sec">
         <h3>Needs your approval</h3>
         {real.length ? <ol className="aq">{real.map(card)}</ol> : <p className="empty">Nothing right now. The model has not raised a HIGH or CRITICAL alert.</p>}
       </div>
