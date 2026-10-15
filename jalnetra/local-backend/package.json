@@ -1,0 +1,1 @@
+{"name":"jalnetra-local-backend","private":true,"type":"module","scripts":{"start":"node server.mjs"},"dependencies":{"@electric-sql/pglite":"^0.5.10","@electric-sql/pglite-socket":"^0.2.13","msedge-tts":"^2.1.0"}}

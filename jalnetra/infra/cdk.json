@@ -1,0 +1,8 @@
+{
+  "app": "npx tsx bin/jalnetra-infra.ts",
+  "context": {
+    "enableSchedules": false,
+    "dbDeletionProtection": true,
+    "dbRemovalPolicy": "retain"
+  }
+}

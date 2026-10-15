@@ -1,0 +1,18 @@
+.flood-spread { margin-bottom: 10px; }
+.flood-spread-head { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+.flood-spread-badge { color: #fbbf24; border: 1px solid rgba(251,191,36,.45); background: rgba(245,158,11,.12); border-radius: 999px; padding: 3px 7px; font-size: 9px; font-weight: 700; letter-spacing: .08em; white-space: nowrap; }
+.flood-spread-warning { color: #f7d38a; font-size: 11.5px; line-height: 1.45; margin: 9px 0 0; }
+.flood-spread-horizons { display: flex; gap: 3px; margin-top: 10px; background: rgba(148,163,184,.1); border-radius: 8px; padding: 3px; }
+.flood-spread-horizons button { flex: 1; border: 0; border-radius: 6px; padding: 5px 4px; background: transparent; color: var(--ink-2); cursor: pointer; font: 500 11px var(--font); }
+.flood-spread-horizons button.on { background: #e6edf3; color: #0b0f14; }
+.flood-spread-map { display: grid; place-items: center; min-height: 130px; margin-top: 10px; overflow: hidden; background: rgba(5,18,25,.78); border: 1px solid var(--line); border-radius: 8px; }
+.flood-spread-map canvas { display: block; width: 100%; height: 160px; image-rendering: pixelated; object-fit: fill; }
+.flood-spread-loading { color: var(--ink-3); font-size: 11.5px; padding: 30px 10px; }
+.flood-spread-facts { margin-top: 10px; }
+.flood-spread-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; color: var(--ink-2); font-size: 11px; }
+.flood-spread-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.flood-spread-legend i { width: 12px; height: 7px; display: inline-block; border-radius: 2px; }
+.flood-spread-legend i.river { background: #117ab0; }
+.flood-spread-legend i.observed { background: #2d8b57; }
+.flood-spread-legend i.water { background: #0ea5e9; }
+.flood-spread-source { color: var(--ink-3); font-size: 10px; line-height: 1.35; margin: 10px 0 0; }

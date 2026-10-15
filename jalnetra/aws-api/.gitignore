@@ -1,0 +1,5 @@
+node_modules/
+dist/
+migration-data/
+.env*
+.test-build/

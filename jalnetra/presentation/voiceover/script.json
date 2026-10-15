@@ -1,0 +1,30 @@
+[
+ {
+  "name": "1-hook",
+  "text": "On the twenty sixth of August twenty twenty six, a glacier collapsed above Langtang in Nepal. The flood ran two hundred and twenty six kilometres to the Indian border. We built JalNetra, a water disaster management system, so that the next one never catches anyone downstream by surprise."
+ },
+ {
+  "name": "2-the-gap",
+  "text": "It took six hours and forty three minutes for the surge to reach Devghat, and the first alarm on Nepal's gauge network came two hours and forty three minutes after the collapse. The gauges near the source went offline while still reading normal, so nothing raised an alarm. A flood travelling at one hundred and eighty kilometres an hour met a warning system that took hours to speak. Downstream, in the bordering regions of India, people learned too late. And the villages far downstream? The water was still hours away. They could have been told that morning. That is the gap we close."
+ },
+ {
+  "name": "3-aws",
+  "text": "JalNetra runs entirely on AWS. Amazon EventBridge wakes an AWS Lambda every three hours. It reads river forecasts for six hundred and eighty one river points across India, and saves a snapshot in Amazon S3, delivered by CloudFront and protected by AWS WAF. The API runs on API Gateway and Lambda, with Amazon RDS for the call record and Secrets Manager for credentials. Amazon Bedrock drafts the warning, Amazon Polly speaks it in Hindi, Amazon Location Service finds a real walking route, Rekognition checks citizen flood photos, and Step Functions with SNS follow up every approval. CloudWatch watches the whole thing."
+ },
+ {
+  "name": "4-live-and-model",
+  "text": "This is India's river network. Each dot is a forecast point, coloured against that river's own record. Here, the Gandak and the Narmada are high but falling, so nothing is rising to flood levels, and the screen says so honestly. For villages, our model combines river flow, how low the village sits, and its distance from the river. We tested it against real satellite radar from the twenty twenty six flood. It caught fifty six and sixty six percent of the villages the radar later saw flooded, with false alarms, and its ranking skill is about zero point seven two to zero point seven five. It is an early warning screen, not a guarantee. A person always decides."
+ },
+ {
+  "name": "5-the-call",
+  "text": "Right now the live river is calm, so these five alerts are marked exercise. Let's approve one. Nothing is sent until a human approves. I select Harpur, review the route, and approve. My phone is ringing. A Hindi voice agent is reading the advisory. In production this goes to the sarpanch and the local rescue contacts for that village. Today it goes only to this demo phone, with limits enforced on the server."
+ },
+ {
+  "name": "6-route-and-ar",
+  "text": "The village head also gets a link on WhatsApp. It opens the predicted route in three D, with a Hindi voice advisory and real walking directions from Amazon Location Service. This A R view is a simulation. There is no flood where I am standing, so I place a made up flood next to me to show how the arrow and the water would appear. It demonstrates the experience, it is not live data."
+ },
+ {
+  "name": "7-vision-close",
+  "text": "We are also building Oasis Builder, a separate A R app. It reads your location and weather, and lets you place a tree to see how much water the land can hold. The same flood data tells you how much a place can absorb before it floods. Prevention and response, on one platform. JalNetra. The gap between a river rising and a village knowing, closed."
+ }
+]

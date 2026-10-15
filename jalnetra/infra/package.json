@@ -1,0 +1,26 @@
+{
+  "name": "jalnetra-infra",
+  "private": true,
+  "version": "0.1.0",
+  "description": "AWS CDK infrastructure for the JalNetra migration",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "synth": "cdk synth --strict",
+    "diff": "cdk diff",
+    "deploy": "cdk deploy --require-approval broadening",
+    "list": "cdk list"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.170.0",
+    "constructs": "^10.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "aws-cdk": "^2.170.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

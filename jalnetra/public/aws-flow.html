@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>JalNetra · data flow on AWS (3D)</title>
+<!--
+  A standalone 3D picture of how JalNetra's data moves through AWS: every service is a mailbox, every piece of data is an envelope.
+  Not part of the website. Open this file in Chrome or Edge (internet needed once, for three.js from a CDN) and screen-record it.
+  Drag to orbit, scroll to zoom, right-drag to pan. Keys: space = pause, 1-5 = flows, S = speed, R = reset view, O = auto-orbit.
+-->
+<style>
+  :root { color-scheme: light; --ink: #20262e; --muted: #7a8089; --line: #d9d5cc; --accent: #2f7d6d; --aws: #5b6b8a; }
+  html, body { margin: 0; height: 100%; background: #f2f0eb; overflow: hidden; font-family: Inter, ui-sans-serif, system-ui, "Segoe UI", sans-serif; color: var(--ink); }
+  canvas { display: block; }
+  .hud { position: fixed; pointer-events: none; inset: 0; }
+  .hud > * { pointer-events: auto; }
+  .top { position: absolute; left: 28px; top: 22px; right: 28px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; pointer-events: none; }
+  .title b { font-size: 21px; letter-spacing: -.02em; display: block; font-weight: 650; }
+  .title span { font-size: 13px; color: var(--muted); }
+  .count { padding: 7px 14px; border-radius: 999px; border: 1px solid var(--line); background: rgba(255,255,255,.7); color: var(--muted); font-size: 13px; }
+  .count b { font-size: 17px; color: var(--ink); margin-right: 5px; font-weight: 650; }
+  .key { position: absolute; left: 28px; top: 78px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--muted); pointer-events: none; }
+  .key i { display: inline-block; width: 18px; height: 8px; border-radius: 3px; margin-right: 9px; }
+  .key i.env { height: 11px; background: #fff; border: 1.5px solid #bdb8ac; position: relative; border-radius: 2px; }
+  .key i.env::after { content: ""; position: absolute; left: 50%; top: 50%; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); transform: translate(-50%, -50%); }
+  .bottom { position: absolute; left: 0; right: 0; bottom: 0; padding: 16px 28px 22px; background: linear-gradient(rgba(242,240,235,0), rgba(242,240,235,.94) 38%); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px 18px; align-items: end; }
+  .scenes { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; }
+  .scenes button { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 999px; border: 1px solid var(--line); background: rgba(255,255,255,.65); color: var(--ink); font: 550 13px inherit; cursor: pointer; }
+  .scenes button i { font-style: normal; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: #e9e6df; font-size: 11px; color: var(--muted); }
+  .scenes button.on { background: #fff; border-color: var(--accent); }
+  .scenes button.on i { background: var(--accent); color: #fff; }
+  .cap small { font: 600 11.5px "JetBrains Mono", ui-monospace, monospace; letter-spacing: .08em; color: var(--accent); text-transform: uppercase; display: flex; align-items: center; gap: 10px; }
+  .dots { display: inline-flex; gap: 5px; }
+  .dots b { width: 7px; height: 7px; border-radius: 50%; background: #cfcabf; }
+  .dots b.on { background: var(--accent); }
+  .cap p { margin: 6px 0 0; font-size: clamp(20px, 2.1vw, 29px); line-height: 1.3; letter-spacing: -.015em; font-weight: 600; max-width: 1100px; }
+  .cap em { display: inline-block; margin-top: 8px; font-style: normal; font: 600 12.5px "JetBrains Mono", ui-monospace, monospace; padding: 4px 10px; border-radius: 999px; background: #fff; border: 1px solid var(--line); color: var(--accent); }
+  .ctl { display: flex; gap: 8px; }
+  .ctl button { min-width: 44px; height: 44px; border-radius: 22px; border: 1px solid var(--line); background: rgba(255,255,255,.75); color: var(--ink); font-size: 14px; font-weight: 600; cursor: pointer; padding: 0 12px; }
+  .ctl button.on { border-color: var(--accent); color: var(--accent); }
+  #err { position: fixed; inset: 0; display: none; place-items: center; text-align: center; padding: 30px; font-size: 18px; color: var(--ink); }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div class="hud">
+  <div class="top">
+    <div class="title"><b>JalNetra on AWS</b><span>Every service is a mailbox. Every piece of data is an envelope.</span></div>
+    <div class="count"><b id="n">15</b>AWS services</div>
+  </div>
+  <div class="key">
+    <div><i style="background:#5b6b8a"></i>AWS service</div>
+    <div><i style="background:#a8a49b"></i>Outside AWS</div>
+    <div><i class="env"></i>Data in motion</div>
+  </div>
+  <div class="bottom">
+    <div class="scenes" id="scenes"></div>
+    <div class="cap"><small><span id="capk"></span><span class="dots" id="dots"></span></small><p id="cap"></p><em id="carry"></em></div>
+    <div class="ctl">
+      <button id="speed" title="Speed (S)">1×</button>
+      <button id="pause" title="Pause (space)">❚❚</button>
+      <button id="orbit" class="on" title="Auto-orbit (O)">⟳</button>
+      <button id="reset" title="Reset view (R)">⌂</button>
+    </div>
+  </div>
+</div>
+<div id="err">The 3D scene needs an internet connection the first time, to load three.js. Please check your connection and reload.</div>
+
+<script type="module">
+import * as THREE from 'three'
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js'
+
+const PALETTE = { bg: 0xf2f0eb, floor: 0xe9e6df, region: 0xe2dfd6, regionEdge: 0xcdc8bc, body: 0xfbfaf7, post: 0xb9b4aa, aws: 0x5b6b8a, outside: 0xa8a49b, accent: 0x2f7d6d, edge: 0xc2bdb2 }
+
+// ---- the map: five calm lanes, left to right. Outside AWS sits outside the region plate. ----
+const NODES = [
+  { id: 'openmeteo', label: 'Open-Meteo · GloFAS', sub: 'free river and weather forecasts', x: -15, z: -7 },
+  { id: 'browser',   label: 'Browser · phone', sub: 'the operator and the village head', x: -15, z: 0 },
+  { id: 'phone',     label: "Village head's phone", sub: 'receives the Hindi call', x: -15, z: 8 },
+  { id: 'scheduler', label: 'EventBridge Scheduler', sub: 'the alarm clock, every 3 hours', x: -8, z: -9, aws: 1 },
+  { id: 'monitor',   label: 'Lambda · river monitor', sub: 'checks 681 river points', x: -8, z: -3.5, aws: 1 },
+  { id: 'apigw',     label: 'API Gateway', sub: 'the front door for requests', x: -8, z: 4, aws: 1 },
+  { id: 's3',        label: 'Amazon S3', sub: 'file storage', x: -1, z: -6.5, aws: 1 },
+  { id: 'cloudfront',label: 'CloudFront + WAF', sub: 'delivers the website safely', x: -1, z: -0.5, aws: 1 },
+  { id: 'api',       label: 'Lambda · API', sub: 'the brain: approvals, helpers', x: -1, z: 5.5, aws: 1 },
+  { id: 'rds',       label: 'Amazon RDS', sub: 'remembers every call and limit', x: 6.5, z: -8, aws: 1 },
+  { id: 'secrets',   label: 'Secrets Manager', sub: 'a locked safe for keys', x: 6.5, z: -2.8, aws: 1 },
+  { id: 'stepfn',    label: 'Step Functions', sub: 'follows up after approval', x: 6.5, z: 2.6, aws: 1 },
+  { id: 'sns',       label: 'Amazon SNS', sub: 'sends messages to the team', x: 6.5, z: 8, aws: 1 },
+  { id: 'bedrock',   label: 'Amazon Bedrock', sub: 'AI that writes the warning', x: 14, z: -8.5, aws: 1 },
+  { id: 'polly',     label: 'Amazon Polly', sub: 'turns text into Hindi speech', x: 14, z: -4, aws: 1 },
+  { id: 'location',  label: 'Amazon Location', sub: 'finds the walking route', x: 14, z: 0.5, aws: 1 },
+  { id: 'rekognition',label: 'Amazon Rekognition', sub: 'checks photos for flood water', x: 14, z: 5, aws: 1 },
+  { id: 'cloudwatch',label: 'Amazon CloudWatch', sub: 'keeps the logbook', x: 0, z: 11.5, aws: 1 },
+  { id: 'omnidim',   label: 'AI voice agent', sub: 'makes the phone call', x: 22, z: 9.5 },
+]
+const N = Object.fromEntries(NODES.map(n => [n.id, n]))
+const LANES = [['Sources', -15], ['Collect', -8], ['Store and deliver', -1], ['Decide', 6.5], ['Understand', 14]]
+const EDGES = {
+  sched: ['scheduler', 'monitor', 'a wake-up alarm'], read: ['openmeteo', 'monitor', 'river water forecasts'], snap: ['monitor', 's3', "today's river status"],
+  s3cf: ['s3', 'cloudfront', 'the stored files'], cfb: ['cloudfront', 'browser', 'the website and river map'], bapi: ['browser', 'apigw', 'a request from the person'], gwapi: ['apigw', 'api', 'the request, checked'],
+  proxy: ['api', 'openmeteo', 'weather, saved for 3 hours'], rds: ['api', 'rds', 'is a call allowed?'], sec: ['api', 'secrets', 'the secret keys'], wf: ['api', 'stepfn', 'a follow-up task'],
+  sns: ['api', 'sns', 'a message for the team'], wfsns: ['stepfn', 'sns', 'warning: call not confirmed'], msns: ['monitor', 'sns', 'news: a river is rising'], call: ['api', 'omnidim', 'the call request'],
+  ring: ['omnidim', 'phone', 'a spoken Hindi warning'], draft: ['api', 'bedrock', 'the flood facts'], speak: ['api', 'polly', 'the written warning'], mp3: ['polly', 's3', 'the warning, as audio'],
+  route: ['api', 'location', 'start and safe place'], photo: ['api', 'rekognition', "a citizen's photo"], logs: ['api', 'cloudwatch', 'a record of what happened'], mlogs: ['monitor', 'cloudwatch', 'a record of what happened'],
+}
+const SCENES = [
+  { title: 'Every 3 hours: the river monitor', steps: [
+    { say: 'An alarm clock, Amazon EventBridge, wakes a small program every three hours. AWS calls it a Lambda.', edges: ['sched'] },
+    { say: 'It collects the latest water forecast for 681 spots along India\u2019s rivers.', edges: ['read'] },
+    { say: 'It checks whether each river is higher than it usually gets, and saves today\u2019s result in Amazon S3, which is cloud file storage.', edges: ['snap'] },
+    { say: 'Amazon CloudFront, guarded by AWS WAF, delivers it quickly and safely to the website.', edges: ['s3cf', 'cfb'] },
+    { say: 'If a river starts rising towards flood level, Amazon SNS sends a message to the team. No phone call is made.', edges: ['msns', 'mlogs'] },
+  ] },
+  { title: 'A visitor opens the live map', steps: [
+    { say: 'When someone opens the map, the page and today\u2019s river status come from Amazon CloudFront and S3.', edges: ['cfb', 's3cf'], back: ['cfb', 's3cf'] },
+    { say: 'Requests from the map go through Amazon API Gateway, the front door, which stops the service being overloaded.', edges: ['bapi', 'gwapi'] },
+    { say: 'The program keeps a saved copy of the weather for three hours, so thousands of visitors don\u2019t overload the weather service.', edges: ['proxy'] },
+    { say: 'Everything that happens is written to Amazon CloudWatch, the logbook, so the team can see it.', edges: ['logs'] },
+  ] },
+  { title: 'A person approves an alert', steps: [
+    { say: 'A person approves an alert. The request goes through the front door, API Gateway, to the main program.', edges: ['bapi', 'gwapi'] },
+    { say: 'AWS Secrets Manager, a locked safe, supplies the keys and the one phone number a call is allowed to reach.', edges: ['sec'] },
+    { say: 'Amazon RDS, the database, checks the rules: one attempt per alert, a short wait between calls, and a daily limit.', edges: ['rds'] },
+    { say: 'Only then is a single Hindi phone call made to the village head.', edges: ['call', 'ring'] },
+    { say: 'AWS Step Functions follows up: it waits, checks, and warns the team if the call did not go through. A call is never repeated by itself.', edges: ['wf', 'sns', 'wfsns'] },
+  ] },
+  { title: 'The advisory, the voice and the route', steps: [
+    { say: 'Amazon Bedrock, an AI service, writes a short warning in Hindi and English from the flood facts.', edges: ['draft'] },
+    { say: 'Amazon Polly turns that written warning into spoken Hindi.', edges: ['speak'] },
+    { say: 'The audio is saved in Amazon S3 and delivered by CloudFront, so a phone can play it.', edges: ['mp3', 's3cf'] },
+    { say: 'Amazon Location Service finds a real walking route along roads to the safe place.', edges: ['route'] },
+  ] },
+  { title: "A citizen's flood photo", steps: [
+    { say: 'A citizen uploads a photo of the water, through the front door, API Gateway.', edges: ['bapi', 'gwapi'] },
+    { say: 'Amazon Rekognition, an image-recognition service, looks for flood water in the photo.', edges: ['photo'] },
+    { say: 'It is only a first check. A person confirms before anyone acts.', edges: ['logs'] },
+  ] },
+]
+
+// ---- renderer: soft light, soft shadows, no glow ----
+let renderer
+try { renderer = new THREE.WebGLRenderer({ antialias: true }) } catch { document.getElementById('err').style.display = 'grid' }
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
+renderer.setSize(innerWidth, innerHeight)
+renderer.shadowMap.enabled = true
+renderer.shadowMap.type = THREE.PCFSoftShadowMap
+document.body.prepend(renderer.domElement)
+
+const scene = new THREE.Scene()
+scene.background = new THREE.Color(PALETTE.bg)
+scene.fog = new THREE.Fog(PALETTE.bg, 60, 115)
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 300)
+const HOME = { pos: new THREE.Vector3(8, 33, 38), target: new THREE.Vector3(3.5, 0.4, 0.6) }
+camera.position.copy(HOME.pos)
+const controls = new OrbitControls(camera, renderer.domElement)
+controls.target.copy(HOME.target); controls.enableDamping = true; controls.dampingFactor = 0.07
+controls.maxPolarAngle = Math.PI * 0.47; controls.minDistance = 12; controls.maxDistance = 85
+controls.autoRotate = true; controls.autoRotateSpeed = 0.25
+controls.update()
+let userUntil = 0
+controls.addEventListener('start', () => { userUntil = performance.now() + 7000 })
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0xe6e1d6, 1.55))
+const sun = new THREE.DirectionalLight(0xffffff, 0.8); sun.position.set(-14, 30, 18); sun.castShadow = true
+sun.shadow.mapSize.set(2048, 2048); sun.shadow.radius = 5; sun.shadow.bias = -0.0004
+Object.assign(sun.shadow.camera, { left: -38, right: 38, top: 30, bottom: -30, near: 1, far: 100 }); scene.add(sun)
+
+const floor = new THREE.Mesh(new THREE.CircleGeometry(80, 80), new THREE.MeshStandardMaterial({ color: PALETTE.floor, roughness: 1 }))
+floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor)
+
+// the AWS region: a soft plate that holds every AWS service; things outside AWS sit beyond its edge
+const plateEdge = new THREE.Mesh(new RoundedBoxGeometry(29.6, 0.08, 27, 3, 0.4), new THREE.MeshStandardMaterial({ color: PALETTE.regionEdge, roughness: 1 }))
+plateEdge.position.set(3.4, 0.04, 1.1); plateEdge.receiveShadow = true; scene.add(plateEdge)
+const plate = new THREE.Mesh(new RoundedBoxGeometry(29, 0.1, 26.4, 3, 0.4), new THREE.MeshStandardMaterial({ color: PALETTE.region, roughness: 1 }))
+plate.position.set(3.4, 0.07, 1.1); plate.receiveShadow = true; scene.add(plate)
+
+function textPlane(text, w, h, color, size, weight = 600) {
+  const c = document.createElement('canvas'); c.width = 1024; c.height = Math.round(1024 * h / w)
+  const g = c.getContext('2d'); g.fillStyle = color; g.font = `${weight} ${size}px Inter, Segoe UI, sans-serif`; g.textBaseline = 'middle'; g.fillText(text, 8, c.height / 2)
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: t, transparent: true, depthWrite: false }))
+  m.rotation.x = -Math.PI / 2; return m
+}
+const region = textPlane('AWS REGION · MUMBAI (ap-south-1)', 15, 0.9, '#7a7f87', 44, 700); region.position.set(-3.6, 0.14, 13.4); scene.add(region)
+for (const [name, x] of LANES) { const l = textPlane(name.toUpperCase(), 7, 0.7, '#9aa0a8', 40, 650); l.position.set(x + (x < -10 ? 1.2 : 0), 0.15, -12.2); scene.add(l) }
+
+// ---- labels (plain cards, no neon) ----
+function labelSprite(title, sub, aws) {
+  const w = 600, h = 150, c = document.createElement('canvas'); c.width = w; c.height = h
+  const g = c.getContext('2d'); const r = 26
+  g.fillStyle = 'rgba(255,255,255,.97)'; g.strokeStyle = '#d9d5cc'; g.lineWidth = 3
+  g.beginPath(); g.moveTo(r, 4); g.arcTo(w - 4, 4, w - 4, h - 4, r); g.arcTo(w - 4, h - 4, 4, h - 4, r); g.arcTo(4, h - 4, 4, 4, r); g.arcTo(4, 4, w - 4, 4, r); g.closePath(); g.fill(); g.stroke()
+  g.fillStyle = '#20262e'; g.font = '650 42px Inter, Segoe UI, sans-serif'; g.fillText(title, 30, 66)
+  g.fillStyle = '#7a8089'; g.font = '500 29px Inter, Segoe UI, sans-serif'; g.fillText(sub, 30, 112)
+  if (aws) { g.fillStyle = '#5b6b8a'; g.font = '700 22px monospace'; g.textAlign = 'right'; g.fillText('AWS', w - 28, 40) }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false }))
+  s.scale.set(4.3, 1.08, 1); return s
+}
+function tagSprite(text) {
+  const c = document.createElement('canvas'), g0 = c.getContext('2d'), font = '650 34px Inter, Segoe UI, sans-serif'
+  g0.font = font
+  const tw = Math.ceil(g0.measureText(text).width), w = Math.max(300, tw + 90), h = 92
+  c.width = w; c.height = h
+  const g = c.getContext('2d'); g.fillStyle = '#fff'; g.strokeStyle = '#bfe0d8'; g.lineWidth = 4
+  g.beginPath(); g.roundRect(4, 8, w - 8, 76, 38); g.fill(); g.stroke()
+  g.fillStyle = '#2f7d6d'; g.font = font; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(text, w / 2, 47)
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false, depthTest: false }))
+  s.scale.set(w / 128, h / 128, 1); return s
+}
+
+// ---- mailboxes (each has its own materials so it can dim when it is not part of the current step) ----
+const nodeObj = {}
+for (const n of NODES) {
+  const mk = (color, rough = 0.6) => new THREE.MeshStandardMaterial({ color, roughness: rough, transparent: true })
+  const m = { body: mk(PALETTE.body, 0.55), post: mk(PALETTE.post, 0.8), door: mk(0xefece5), band: mk(n.aws ? PALETTE.aws : PALETTE.outside), flag: mk(PALETTE.accent, 0.5), slot: new THREE.MeshBasicMaterial({ color: 0x4b4f55, transparent: true }) }
+  const g = new THREE.Group(); g.position.set(n.x, 0.1, n.z)
+  const post = new THREE.Mesh(new THREE.BoxGeometry(0.2, 1.5, 0.2), m.post); post.position.y = 0.75; g.add(post)
+  const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.65, 0.12, 24), m.post); foot.position.y = 0.06; g.add(foot)
+  const body = new THREE.Mesh(new RoundedBoxGeometry(2.0, 1.15, 1.35, 5, 0.3), m.body); body.position.y = 2.05; g.add(body)
+  const strip = new THREE.Mesh(new RoundedBoxGeometry(2.04, 0.2, 1.39, 3, 0.1), m.band); strip.position.y = 1.62; g.add(strip)
+  const door = new THREE.Mesh(new RoundedBoxGeometry(1.45, 0.62, 0.05, 3, 0.04), m.door); door.position.set(0, 2.15, 0.69); g.add(door)
+  const slot = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.05, 0.02), m.slot); slot.position.set(0, 2.15, 0.725); g.add(slot)
+  const flag = new THREE.Group(); flag.position.set(1.08, 1.95, 0)
+  const arm = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.75, 0.09), m.band); arm.position.y = 0.375; flag.add(arm)
+  const plateF = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.26, 0.06), m.flag); plateF.position.set(0.25, 0.66, 0); flag.add(plateF)
+  flag.rotation.z = -Math.PI; g.add(flag)
+  g.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true } })
+  const label = labelSprite(n.label, n.sub, !!n.aws); label.position.set(0, 3.7, 0); g.add(label)
+  scene.add(g)
+  nodeObj[n.id] = { g, flag, mats: Object.values(m), label, flagTarget: -Math.PI, bump: 0, dim: 1, dimTarget: 1, slotPos: new THREE.Vector3(n.x, 2.35, n.z + 0.7) }
+}
+
+// ---- pipes: thin arcs, quiet until used ----
+const edgeObj = {}
+for (const [id, [a, b, payload]] of Object.entries(EDGES)) {
+  const A = nodeObj[a].slotPos.clone().setY(3.5), B = nodeObj[b].slotPos.clone().setY(3.5)
+  const mid = A.clone().lerp(B, 0.5); mid.y += 2.2 + A.distanceTo(B) * 0.2
+  const curve = new THREE.QuadraticBezierCurve3(A, mid, B)
+  const mat = new THREE.MeshBasicMaterial({ color: PALETTE.edge, transparent: true, opacity: 0.35 })
+  const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 48, 0.035, 6, false), mat)
+  scene.add(tube); edgeObj[id] = { curve, mat, payload, from: a, to: b }
+}
+
+// ---- envelopes (bigger, so they read from across the room) ----
+const paperMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.7 })
+const flapMat = new THREE.MeshStandardMaterial({ color: 0xece8de, roughness: 0.8, side: THREE.DoubleSide })
+const sealMat = new THREE.MeshStandardMaterial({ color: PALETTE.accent, roughness: 0.5 })
+const flapShape = new THREE.Shape(); flapShape.moveTo(-0.34, -0.24); flapShape.lineTo(0.34, -0.24); flapShape.lineTo(0, 0.06); flapShape.closePath()
+const flapGeo = new THREE.ShapeGeometry(flapShape)
+function makeEnvelope(scale = 1) {
+  const e = new THREE.Group()
+  e.add(new THREE.Mesh(new RoundedBoxGeometry(0.78, 0.06, 0.52, 2, 0.02), paperMat))
+  const flap = new THREE.Mesh(flapGeo, flapMat); flap.rotation.x = -Math.PI / 2; flap.position.set(0, 0.034, 0.1); e.add(flap)
+  const seal = new THREE.Mesh(new THREE.CircleGeometry(0.06, 20), sealMat); seal.rotation.x = -Math.PI / 2; seal.position.set(0, 0.04, -0.02); e.add(seal)
+  e.traverse(o => { if (o.isMesh) o.castShadow = true })
+  e.scale.setScalar(scale * 1.55); return e
+}
+const live = []
+function clearEnvelopes() { live.forEach(p => { scene.remove(p.obj); if (p.tag) scene.remove(p.tag) }); live.length = 0 }
+
+// ---- the director ----
+const STEP_SECONDS = 3.4, TRAVEL = 1.9
+const stepLength = () => (window.__stepSeconds && window.__stepSeconds[`${sceneIx}-${stepIx}`]) || STEP_SECONDS
+const CAPTURE = new URLSearchParams(location.search).has('capture')
+let sceneIx = 0, stepIx = 0, stepT = 0, paused = false, loop = true, speed = 1
+const focus = { target: HOME.target.clone(), dist: HOME.pos.distanceTo(HOME.target) }
+const $ = id => document.getElementById(id)
+const els = { scenes: $('scenes'), cap: $('cap'), capk: $('capk'), dots: $('dots'), carry: $('carry'), pause: $('pause'), orbit: $('orbit'), reset: $('reset'), speed: $('speed'), n: $('n') }
+els.n.textContent = new Set(SCENES.flatMap(s => s.steps.flatMap(st => st.edges.flatMap(e => EDGES[e].slice(0, 2)))).filter(id => N[id].aws)).size
+SCENES.forEach((s, i) => { const b = document.createElement('button'); b.innerHTML = `<i>${i + 1}</i>${s.title}`; b.onclick = () => startScene(i); els.scenes.appendChild(b) })
+
+function startScene(i) { sceneIx = i; stepIx = 0; startStep() }
+function startStep() {
+  clearEnvelopes(); stepT = 0
+  const sc = SCENES[sceneIx], st = sc.steps[stepIx]
+  els.capk.textContent = `${sc.title} · step ${stepIx + 1} of ${sc.steps.length}`
+  els.dots.innerHTML = sc.steps.map((_, k) => `<b class="${k === stepIx ? 'on' : ''}"></b>`).join('')
+  els.cap.textContent = st.say
+  els.carry.textContent = 'In the envelope: ' + [...new Set(st.edges.map(e => EDGES[e][2]))].join(' · ')
+  ;[...els.scenes.children].forEach((b, k) => b.classList.toggle('on', k === sceneIx))
+  Object.values(edgeObj).forEach(e => { e.mat.color.set(PALETTE.edge); e.mat.opacity = 0.3 })
+  const active = new Set()
+  st.edges.forEach((id, k) => {
+    const e = edgeObj[id]; e.mat.color.set(PALETTE.accent); e.mat.opacity = 1
+    active.add(e.from); active.add(e.to)
+    const reverse = !!st.back?.includes(id)
+    for (let d = 0; d < 2; d++) {
+      const obj = makeEnvelope(d === 0 ? 1 : 0.8); obj.visible = false; scene.add(obj)
+      const tag = d === 0 ? tagSprite(e.payload) : null; if (tag) scene.add(tag)
+      live.push({ obj, tag, edge: e, delay: k * 0.4 + d * 0.55, reverse, head: d === 0, arrived: false })
+    }
+  })
+  // spotlight: everything not in this step steps back, and the camera drifts to the action
+  const c = new THREE.Vector3(); let spread = 0
+  active.forEach(id => c.add(new THREE.Vector3(N[id].x, 0, N[id].z)))
+  c.divideScalar(Math.max(1, active.size))
+  active.forEach(id => { spread = Math.max(spread, c.distanceTo(new THREE.Vector3(N[id].x, 0, N[id].z))) })
+  focus.target.set(c.x, 0.6, c.z); focus.dist = Math.min(52, Math.max(28, 22 + spread * 1.5))
+  Object.entries(nodeObj).forEach(([id, nd]) => { nd.dimTarget = active.has(id) ? 1 : 0.34; nd.flagTarget = -Math.PI })
+}
+function advance() {
+  const sc = SCENES[sceneIx]
+  if (stepIx + 1 < sc.steps.length) { stepIx++; startStep() }
+  else if (loop) startScene((sceneIx + 1) % SCENES.length)
+  else { paused = true; els.pause.textContent = '▶' }
+}
+
+const clock = new THREE.Clock()
+const P = new THREE.Vector3(), T = new THREE.Vector3(), DIR = new THREE.Vector3(), WANT = new THREE.Vector3()
+let simTime = 0
+function update(dt, time) {
+  if (!paused) {
+    stepT += dt * speed
+    for (const p of live) {
+      const k = (stepT - p.delay) / TRAVEL
+      if (k < 0) { p.obj.visible = false; continue }
+      const u = Math.min(k, 1), eased = u * u * (3 - 2 * u), at = p.reverse ? 1 - eased : eased
+      p.edge.curve.getPoint(at, P); p.edge.curve.getTangent(at, T)
+      if (p.reverse) T.negate()
+      p.obj.visible = k < 1.28
+      p.obj.position.copy(P)
+      p.obj.rotation.y = Math.atan2(T.x, T.z) - Math.PI / 2
+      p.obj.rotation.z = Math.sin(time * 5 + p.delay * 7) * 0.12
+      if (k >= 1) {
+        const slide = Math.min((k - 1) / 0.28, 1), nd = nodeObj[p.reverse ? p.edge.from : p.edge.to]
+        p.obj.position.lerp(nd.slotPos, slide); p.obj.scale.setScalar((p.head ? 1.55 : 1.24) * (1 - slide * 0.55))
+        if (!p.arrived && p.head) { p.arrived = true; nd.flagTarget = 0; nd.bump = 1 }
+      }
+      if (p.tag) { p.tag.visible = k < 1; p.tag.position.set(P.x, P.y + 1.15, P.z) }
+    }
+    if (stepT > stepLength()) advance()
+  }
+  for (const nd of Object.values(nodeObj)) {
+    nd.flag.rotation.z += (nd.flagTarget - nd.flag.rotation.z) * Math.min(1, dt * 6)
+    nd.bump = Math.max(0, nd.bump - dt * 2.2)
+    nd.g.scale.setScalar(1 + Math.sin(nd.bump * Math.PI) * 0.045)
+    nd.dim += (nd.dimTarget - nd.dim) * Math.min(1, dt * 4)
+    nd.mats.forEach(m => { m.opacity = nd.dim })
+    nd.label.material.opacity = 0.35 + nd.dim * 0.65
+  }
+  // the camera follows the action unless you are driving it
+  if (performance.now() > userUntil) {
+    controls.target.lerp(focus.target, Math.min(1, dt * 1.4))
+    DIR.copy(camera.position).sub(controls.target).normalize()
+    WANT.copy(controls.target).addScaledVector(DIR, focus.dist)
+    camera.position.lerp(WANT, Math.min(1, dt * 1.1))
+  }
+  controls.update()
+  renderer.render(scene, camera)
+}
+function tick() {
+  const dt = Math.min(clock.getDelta(), 0.05)
+  update(dt, clock.elapsedTime)
+  requestAnimationFrame(tick)
+}
+// capture mode (?capture=1): no free-running loop; a recorder calls __step(dt) once per video frame
+window.__step = dt => { simTime += dt; update(dt, simTime) }
+window.__state = () => ({ scene: sceneIx, step: stepIx, stepT })
+
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight) })
+const togglePause = () => { paused = !paused; els.pause.textContent = paused ? '▶' : '❚❚' }
+const toggleOrbit = () => { controls.autoRotate = !controls.autoRotate; els.orbit.classList.toggle('on', controls.autoRotate) }
+const cycleSpeed = () => { speed = speed === 1 ? 0.6 : speed === 0.6 ? 1.7 : 1; els.speed.textContent = (speed === 0.6 ? '0.6' : speed === 1.7 ? '1.7' : '1') + '×' }
+const resetView = () => { focus.target.copy(HOME.target); focus.dist = HOME.pos.distanceTo(HOME.target); userUntil = 0 }
+els.pause.onclick = togglePause; els.orbit.onclick = toggleOrbit; els.reset.onclick = resetView; els.speed.onclick = cycleSpeed
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); togglePause() }
+  else if (e.key === 'o' || e.key === 'O') toggleOrbit()
+  else if (e.key === 'r' || e.key === 'R') resetView()
+  else if (e.key === 's' || e.key === 'S') cycleSpeed()
+  else if (/^[1-5]$/.test(e.key)) startScene(Number(e.key) - 1)
+})
+startScene(0)
+if (CAPTURE) { userUntil = 0; controls.autoRotate = true; update(0.001, 0) } else tick()
+</script>
+</body>
+</html>
