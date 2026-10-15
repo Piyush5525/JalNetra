@@ -16,3 +16,6 @@
 .flood-spread-legend i.observed { background: #2d8b57; }
 .flood-spread-legend i.water { background: #0ea5e9; }
 .flood-spread-source { color: var(--ink-3); font-size: 10px; line-height: 1.35; margin: 10px 0 0; }
+.town-legend { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 6px 0 8px; font-size: 11px; color: var(--ink-2); }
+.town-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.town-legend i { width: 12px; height: 8px; border-radius: 2px; display: inline-block; }

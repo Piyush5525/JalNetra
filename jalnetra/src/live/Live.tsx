@@ -30,6 +30,7 @@ import { floodTile, useSentinel } from './sentinel'
 import { draftAdvisory, hindiRouteLine, walkingRoute, type Draft, type Walk } from './aws'
 import { encodeRoute, mapsLink, publicBase, shareText, shortRouteLink, simplify, type SharedRoute } from './routeShare'
 import type { PointStatus, RiverPoint, Status } from '../engine/india'
+import { SPREAD_CLOCK, SPREAD_RADIUS_KM, REACH_KM, buildTownSpread, townFacts, townImage, type TownFacts } from '../floodSpread/townSpread'
 
 type Mode = 'live' | 'demo'
 type AlertState = { stage: 'review' | 'approving' | 'calling' | 'contacted' | 'evacuating' | 'resolved' | 'dismissed' | 'error'; incident?: Incident; approved?: boolean; error?: string; telephony?: string }
@@ -83,10 +84,13 @@ function exerciseOutcome(a: DemoAlert, masked: string | null): Partial<AlertStat
 // Exercise alerts: five clearly labelled scenario villages fill the review queue so an operator can rehearse
 // review -> approve or reject -> call. They are never presented as live predictions: each is tagged EXERCISE and its message says so.
 const EXERCISE_LEVELS: [Level, number, number, number][] = [['CRITICAL', 3, 0.84, 82], ['HIGH', 6, 0.68, 71], ['HIGH', 8, 0.62, 66], ['CRITICAL', 2, 0.88, 86], ['HIGH', 12, 0.56, 61]]
-function exerciseRisks(): VillageRisk[] {
+// `arrival` is the model's own flood-front arrival (hours until connected water is within 1 km of the village) from the
+// terrain spread replay; the scripted value is used only until the terrain has loaded.
+function exerciseRisks(arrival?: Map<number, number | null>): VillageRisk[] {
   return EXERCISE_IDS.flatMap((id, i) => {
     if (!VBY.has(id)) return []
-    const [level, impactH, pMax, score] = EXERCISE_LEVELS[i]
+    const [level, scripted, pMax, score] = EXERCISE_LEVELS[i]
+    const impactH = arrival?.get(id) ?? scripted
     const p = Array.from({ length: 49 }, (_, h) => Math.min(pMax, pMax * (0.15 + 0.85 * Math.min(1, h / Math.max(impactH, 1)))))
     const pAt: Record<number, number> = {}, levelAt: Record<number, Level> = {}
     for (const hz of HORIZONS) { pAt[hz] = p[hz]; levelAt[hz] = hz >= impactH ? level : hz >= impactH / 2 ? 'MEDIUM' : 'LOW' }
@@ -207,7 +211,9 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
     for (let i = 0; i < a.length; i++) { m[i] = a[i] === 2 || b[i] === 2 ? 2 : a[i] || b[i] ? 1 : 0; p[i] = Math.max(extents[0].prob[i], extents[24].prob[i]) }
     return { m, p }
   }, [extents])
-  const exercise = useMemo(() => (mode === 'live' && run ? exerciseRisks() : []), [mode, run])
+  // Town-level flood spread (normal river vs flooded river) for the exercise villages, replayed from September 2026.
+  const spread = useMemo(() => (mode === 'live' && terrain ? buildTownSpread(terrain, EXERCISE_IDS.flatMap(id => { const v = VBY.get(id); return v ? [{ id, lat: v.lat, lng: v.lng }] : [] })) : null), [mode, terrain])
+  const exercise = useMemo(() => (mode === 'live' && run ? exerciseRisks(spread?.arrival) : []), [mode, run, spread])
   const exerciseIds = useMemo(() => new Set(exercise.map(e => e.id)), [exercise])
   const risk = useMemo(() => new Map([...(run?.villages ?? []), ...exercise].map(v => [v.id, v])), [run, exercise])
   const routes = useMemo(() => {
@@ -215,9 +221,9 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
     if (!run || !graph || !terrain || !routeMask) return out
     const want = new Set(run.villages.filter(v => v.level === 'HIGH' || v.level === 'CRITICAL').sort((a, b) => b.score - a.score).slice(0, 15).map(v => v.id)); if (sel) want.add(sel)
     for (const e of exercise) want.add(e.id)
-    for (const id of want) { const v = VBY.get(id)!; out.set(id, evacuate(graph, terrain, routeMask.m, routeMask.p, M.pixel.pstar, v, M.pois)) }
+    for (const id of want) { const v = VBY.get(id)!; const rm = spread && exerciseIds.has(id) ? spread.routeMask : { m: routeMask.m, p: routeMask.p }; out.set(id, evacuate(graph, terrain, rm.m, rm.p, M.pixel.pstar, v, M.pois)) }
     return out
-  }, [run, graph, terrain, routeMask, sel, exercise])
+  }, [run, graph, terrain, routeMask, sel, exercise, spread, exerciseIds])
   const stats = useMemo(() => (extents && graph && terrain ? impactStats(graph, extents[h].mask, D.roads as any, terrain, M.pois) : null), [extents, graph, terrain, h])
 
   const counts = run?.counts[h] ?? { LOW: 291, MEDIUM: 0, HIGH: 0, CRITICAL: 0 }
@@ -295,7 +301,15 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
         renderSubLayers: (p: any) => { if (!p.data) return null; const b = p.tile.boundingBox; return new BitmapLayer(p, { data: undefined, image: p.data, bounds: [b[0][0], b[0][1], b[1][0], b[1][1]], opacity: 0.9 }) } }))
     } else L.push(new BitmapLayer({ id: 'obs-latest', image: o3, bounds: D.bounds as any, opacity: 0.9, tintColor: [90, 140, 255] }))
   }
-  if (layers.predicted && extents && tb && extents[h].canvas) L.push(new BitmapLayer({ id: 'pred-' + h + '-' + run!.now, image: extents[h].canvas, bounds: tb, opacity: 1, textureParameters: { minFilter: 'nearest', magFilter: 'nearest' } as any }))
+  // Exercise town selected: show the normal river and the flooded river around that town instead of the regional extent.
+  const selTown = sel && exerciseIds.has(sel) ? VBY.get(sel) ?? null : null
+  const townLayer = useMemo(() => (spread && terrain && selTown ? townImage(spread, terrain, selTown, h) : null), [spread, terrain, selTown, h])
+  const townInfo = useMemo(() => (spread && terrain && selTown ? townFacts(spread, terrain, selTown, h) : null), [spread, terrain, selTown, h])
+  if (townLayer && selTown) {
+    L.push(new BitmapLayer({ id: `town-spread-${selTown.id}-${h}`, image: townLayer.canvas, bounds: townLayer.bounds, opacity: 0.92, textureParameters: { minFilter: 'nearest', magFilter: 'nearest' } as any }))
+    L.push(new ScatterplotLayer({ id: 'town-window', data: [selTown], getPosition: (d: any) => [d.lng, d.lat], getRadius: SPREAD_RADIUS_KM * 1000, radiusUnits: 'meters', filled: false, stroked: true, getLineColor: [255, 255, 255, 150], lineWidthMinPixels: 1.5 }))
+  }
+  if (layers.predicted && !townLayer && extents && tb && extents[h].canvas) L.push(new BitmapLayer({ id: 'pred-' + h + '-' + run!.now, image: extents[h].canvas, bounds: tb, opacity: 1, textureParameters: { minFilter: 'nearest', magFilter: 'nearest' } as any }))
   if (layers.roads) L.push(new PathLayer({ id: 'roads', data: D.roads, getPath: (d: any) => d.path, getColor: [226, 232, 240, 110], widthMinPixels: 1 }))
   if (layers.rain && run) {
     const pts = M.rainPoints.map(([lat, lng]) => ({ lat, lng, mm: run.ctx.rain48 }))
@@ -363,7 +377,7 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
       <DeckGL viewState={view} onViewStateChange={(e: any) => setView(e.viewState)} controller layers={L} getCursor={({ isHovering }) => (isHovering ? 'pointer' : 'grab')}
         getTooltip={({ object, layer }: any) => !object ? null : layer?.id === 'villages' ? { text: `${object.name} · ${risk.get(object.id)?.levelAt[h] ?? 'LOW'} at ${HLABEL[h]}` } : layer?.id === 'india-pts' ? { text: `${object.river} near ${object.near}: ${india.statuses.has(object.id) ? INDIA_WORD[india.statuses.get(object.id)!.status] : 'Data unavailable'}` } : layer?.id === 'pois' ? { text: `${object.n} (${object.a === 'h' ? 'hospital' : 'school / college'})` } : layer?.id === 'stations' ? { text: `${object.label}: ${fmtQ(object.f.q[72 + h])} m³/s, ${object.f.trend.toLowerCase()}` } : null} />
 
-      {mapView === 'current' && layers.predicted && extents && <div className="hazard-legend" aria-label="Predicted flood colours">
+      {mapView === 'current' && layers.predicted && !townLayer && extents && <div className="hazard-legend" aria-label="Predicted flood colours">
         <b>Predicted flood at {HLABEL[h]}</b>
         <span><i style={{ background: 'rgba(255,236,90,.55)' }} />Watch</span>
         <span><i style={{ background: '#facc15' }} />Likely</span>
@@ -449,7 +463,7 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
 
       {/* ---------- right: alert queue or village ---------- */}
       {run && (selR || queue.length > 0 || detail) && <aside className="lpanel right">
-        {selR ? <VillagePanel r={selR} route={routes.get(selR.id) ?? null} run={run} mode={mode} h={h} st={alerts[selR.id]} setSt={s => setAlerts(a => ({ ...a, [selR.id]: { ...(a[selR.id] ?? {}), ...s } as AlertState }))} onClose={closeSel} onOpenIncident={onOpenIncident} exercise={exerciseIds.has(selR.id)} googleDrive={gDrive} realInfo={real} />
+        {selR ? <VillagePanel r={selR} route={routes.get(selR.id) ?? null} run={run} mode={mode} h={h} st={alerts[selR.id]} setSt={s => setAlerts(a => ({ ...a, [selR.id]: { ...(a[selR.id] ?? {}), ...s } as AlertState }))} onClose={closeSel} onOpenIncident={onOpenIncident} exercise={exerciseIds.has(selR.id)} googleDrive={gDrive} realInfo={real} townInfo={townInfo} />
           : <AlertQueue status={queueStatus} exerciseIds={exerciseIds} queue={queue} alerts={alerts} onView={pick} onDismiss={id => setAlerts(a => ({ ...a, [id]: { stage: 'dismissed' } }))} onOpenIncident={onOpenIncident} mode={mode} />}
         {stats && detail && <section>
           <div className="kicker">Potentially affected at {HLABEL[h]}</div>
@@ -637,7 +651,7 @@ function AlertQueue({ status, exerciseIds, queue, alerts, onView, onDismiss, onO
   )
 }
 
-function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncident, exercise, googleDrive, realInfo }: { googleDrive?: { km: number; minutes: number } | null; realInfo?: { walk: { km: number; minutes: number } | null; drive: { km: number; minutes: number } | null; busy: boolean; note: string }; exercise: boolean; r: VillageRisk; route: Route | null; run: ModelRun; mode: Mode; h: number; st?: AlertState; setSt: (s: Partial<AlertState>) => void; onClose: () => void; onOpenIncident: (id: string) => void }) {
+function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncident, exercise, googleDrive, realInfo, townInfo }: { townInfo?: TownFacts | null; googleDrive?: { km: number; minutes: number } | null; realInfo?: { walk: { km: number; minutes: number } | null; drive: { km: number; minutes: number } | null; busy: boolean; note: string }; exercise: boolean; r: VillageRisk; route: Route | null; run: ModelRun; mode: Mode; h: number; st?: AlertState; setSt: (s: Partial<AlertState>) => void; onClose: () => void; onOpenIncident: (id: string) => void }) {
   const v = VBY.get(r.id)!
   const [why, setWhy] = useState(false)
   const [review, setReview] = useState(false)
@@ -735,6 +749,7 @@ function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncide
         <div className="dim tiny">Risk score {r.score} of {maxPts}. CRITICAL needs ≥50% probability, score ≥65 and impact within 12 h. Probability comes from a logistic model fitted to 2026 radar; its terms (log-odds):</div>
         <ul className="terms">{r.terms.map(t => <li key={t.label}><span>{t.label}</span><span className={t.value >= 0 ? 'pos' : 'neg'}>{t.value >= 0 ? '+' : ''}{t.value.toFixed(2)}</span></li>)}</ul>
       </div>}
+      {exercise && townInfo && <TownSpread name={v.name} f={townInfo} />}
       <div className="kicker mt">Evacuation route</div>
       {route ? <>
         <p className="route"><b>{v.name}</b> → {route.km.toFixed(1)} km {route.ok ? 'route avoiding likely water' : 'least-exposed route'} ({route.roadKm.toFixed(1)} km on mapped roads) → <b>{route.shelter.n}</b> ({route.shelter.a === 'h' ? 'hospital' : 'school / college'}{['School', 'Hospital'].includes(route.shelter.n) ? ', unnamed in OpenStreetMap' : ''})</p>
@@ -783,6 +798,44 @@ function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncide
         </div>}
       </div>}
     </section>
+  )
+}
+
+function TownSpread({ name, f }: { name: string; f: TownFacts }) {
+  const [params, setParams] = useState(false)
+  const hz = f.horizon === 0 ? 'now' : `+${f.horizon} h`
+  const arrive = f.arrivalH === null ? 'not within 24 h' : f.arrivalH === 0 ? 'already at the village' : `about ${f.arrivalH} h`
+  return (
+    <div className="town-spread">
+      <div className="kicker mt">Flood spread · normal river vs flooded river</div>
+      <div className="town-legend">
+        <span><i style={{ background: '#2563eb' }} />Normal river channel</span>
+        <span><i style={{ background: '#fb923c' }} />Extra land under water{f.horizon > 0 ? ' (already at NOW)' : ''}</span>
+        {f.horizon > 0 && <span><i style={{ background: '#dc2626' }} />New water since NOW</span>}
+      </div>
+      <dl className="kv small">
+        <dt>Water reaches {name}</dt><dd><b>{arrive}</b>{f.reached ? ` · water is at the village at ${hz}` : ` · not yet at the village at ${hz}`}</dd>
+        <dt>Extra flooded area at {hz}</dt><dd><b>{f.extraKm2.toLocaleString()} km²</b> beyond the normal {f.normalKm2.toLocaleString()} km² river, within {f.radiusKm} km of the village{f.horizon > 0 ? ` (+${f.growthKm2.toLocaleString()} km² since NOW)` : ''}</dd>
+        <dt>Land within 2 km</dt><dd>{Math.round(f.share2km * 100)}% under predicted water</dd>
+        <dt>Nearest water</dt><dd>{f.waterKm === null ? 'No predicted flood water in the window' : `flood edge ${f.waterKm.toFixed(1)} km away`}{f.riverKm !== null ? ` · normal river ${f.riverKm.toFixed(1)} km away` : ''}</dd>
+        <dt>Highest ground reached</dt><dd>{f.maxHandM === null ? '—' : `${f.maxHandM.toFixed(1)} m above the channel`}</dd>
+      </dl>
+      <p className="note tight">Replay of the September 2026 Gandak flood at {fmtIST(Date.parse(SPREAD_CLOCK))}. Not a live forecast and not a depth estimate.</p>
+      <button className="whybtn" onClick={() => setParams(p => !p)}>{params ? <FiChevronDown /> : <FiChevronRight />} Parameters used for this map</button>
+      {params && <div className="why">
+        <ul className="terms">
+          <li><span>Flood probability</span><span>logistic(b0 {M.pixel.b0.toFixed(2)} + {M.pixel.b[0].toFixed(2)}·ln(Q/4000) {M.pixel.b[1].toFixed(2)}·HAND {M.pixel.b[2].toFixed(2)}·dist)</span></li>
+          <li><span>Wet if probability ≥</span><span>{M.pixel.pstar}</span></li>
+          <li><span>Q (river discharge)</span><span>GloFAS v4, highest flow in previous 72 h, at the cell's river chainage</span></li>
+          <li><span>HAND</span><span>Height above nearest channel, Copernicus DEM, −5 to 25 m</span></li>
+          <li><span>dist</span><span>Distance to the river, km (0.18 km cells)</span></li>
+          <li><span>Normal river</span><span>JRC permanent surface water</span></li>
+          <li><span>Connectivity</span><span>Wet cells kept only if linked to the river (4-neighbour)</span></li>
+          <li><span>Window</span><span>{SPREAD_RADIUS_KM} km around village; reached = water within {REACH_KM} km</span></li>
+          <li><span>Calibration</span><span>3 Sentinel-1 radar flood maps, Sep–Oct 2026</span></li>
+        </ul>
+      </div>}
+    </div>
   )
 }
 
