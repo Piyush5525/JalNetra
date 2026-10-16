@@ -29,7 +29,7 @@ export function citizenMessages({ village, hours, shelter = null, exercise = fal
   }
 }
 
-export function createEscalation({ env, dispatch, fetchFn = fetch, now = () => Date.now(), file, log = console.log, dryRun = false, pollMs = 1500, retryMs = 10_000, callPollMs = 8_000, requestIdFor = () => null }) {
+export function createEscalation({ env, dispatch, fetchFn = fetch, now = () => Date.now(), file, log = console.log, dryRun = false, pollMs = 1500, retryMs = 10_000, callPollMs = 8_000, requestIdFor = () => null, buildPdf = null }) {
   const records = new Map()   // id -> record
   const byKey = new Map()     // `${sessionId}:${alertId}` -> id
   const ttlMs = Number(env.ESCALATION_TTL_MIN || 20) * 60_000
@@ -41,6 +41,10 @@ export function createEscalation({ env, dispatch, fetchFn = fetch, now = () => D
   let lastCitizenCall = 0
   let polling = false, offset = 0, stopPoll = false
   const busy = r => /concurrency|busy|limit/i.test(String(r?.error ?? ''))
+  // NDRF bot: its own Telegram bot token and chat. Falls back to the operator bot while demoing.
+  const ndrfToken = () => env.NDRF_TELEGRAM_BOT_TOKEN || ''
+  const ndrfChat = () => String(env.NDRF_TELEGRAM_CHAT_ID || '')
+  const reportInputs = new Map()   // `${sessionId}:${alertId}` -> report input posted by the page at approval
   const sarpanchAgent = () => env.OMNIDIM_SARPANCH_AGENT_ID || env.OMNIDIM_SARPANCH_AGENT || ''
   const omnidimKey = () => env.OMNIDIM_API_KEY || env.OMNIDIM_KEY || ''
 
@@ -65,6 +69,8 @@ export function createEscalation({ env, dispatch, fetchFn = fetch, now = () => D
       sarpanch: { phone: mask(sarpanchPhone()), call: r.stage1 },
       citizen: { phone: mask(citizenPhone()), call: r.citizenCall },
       acknowledged: Boolean(r.acknowledged),
+      ndrf: r.ndrf ?? null,
+      ndrfConfigured: Boolean(ndrfToken() && ndrfChat()),
       channels: { telegram: Boolean(tgToken() && tgChat()), callWebhook: Boolean(webhookToken()) },
       citizenMessage: r.citizen, events: r.events,
     }
@@ -179,6 +185,54 @@ export function createEscalation({ env, dispatch, fetchFn = fetch, now = () => D
     }
   }
 
+  /** Send a PDF to the NDRF bot. Resolves to { ok, note }. */
+  async function sendToNdrf(buffer, filename, caption) {
+    if (!ndrfToken() || !ndrfChat()) return { ok: false, note: 'NDRF bot is not configured (NDRF_TELEGRAM_BOT_TOKEN, NDRF_TELEGRAM_CHAT_ID).' }
+    if (dryRun) return { ok: true, note: 'Dry run: report not sent.', dry: true }
+    const form = new FormData()
+    form.append('chat_id', ndrfChat()); form.append('caption', caption.slice(0, 900))
+    form.append('document', new Blob([buffer], { type: 'application/pdf' }), filename)
+    const res = await fetchFn(`https://api.telegram.org/bot${ndrfToken()}/sendDocument`, { method: 'POST', body: form, signal: AbortSignal.timeout(40_000) })
+    const out = await res.json().catch(() => ({}))
+    return out?.ok ? { ok: true, note: 'Sent to the NDRF bot.' } : { ok: false, note: out?.description ?? `Telegram error ${res.status}` }
+  }
+
+  /** The page stores the report data at approval, so the report can be built the moment the alert is escalated. */
+  function setReportInput(sessionId, alertId, input) { reportInputs.set(`${sessionId}:${alertId}`, input) }
+
+  /** Escalation reaches the NDRF team: one report, once, however the Sarpanch decided. */
+  async function notifyNdrf(r, how) {
+    if (r.ndrf?.status === 'sent') return
+    const input = reportInputs.get(r.key)
+    const caption = `🚨 JalNetra flood advisory for NDRF\n${r.village}${r.district ? `, ${r.district}` : ''}\nEscalated by the Sarpanch (${r.decidedVia ?? 'confirmed'}). Citizens in the evacuation zone are being alerted.\nDetailed report attached.`
+    try {
+      if (!input || !buildPdf) {
+        r.ndrf = { status: 'no_report', how, at: new Date(now()).toISOString(), note: 'The report data was not available on the server.' }
+        event(r, 'NDRF could not be sent a report: the report data was not available. Use "Send file to NDRF" on the page.', 'warn')
+        return
+      }
+      const built = buildPdf({ ...input, generatedAt: new Date(now()), dataClock: input.dataClock ? new Date(input.dataClock) : null, escalation: { status: 'escalated', via: r.decidedVia ?? null } })
+      const out = await sendToNdrf(built.bytes, built.filename, caption)
+      r.ndrf = { status: out.ok ? (out.dry ? 'dry_run' : 'sent') : 'failed', how, at: new Date(now()).toISOString(), note: out.note, filename: built.filename }
+      event(r, out.ok ? `NDRF team notified: advisory report sent to the NDRF bot (${how}).` : `NDRF notification failed: ${out.note}`, out.ok ? 'ok' : 'warn')
+      if (out.ok) void tg('sendMessage', { chat_id: tgChat(), text: `📨 ${r.village}: advisory report sent to the NDRF team.` })
+    } catch (e) {
+      r.ndrf = { status: 'failed', how, at: new Date(now()).toISOString(), note: String(e?.message ?? e) }
+      event(r, `NDRF notification failed: ${r.ndrf.note}`, 'warn')
+    }
+  }
+
+  /** The operator pressed "Send file to NDRF" with the PDF built in the browser. */
+  async function manualNdrf({ sessionId, alertId, buffer, filename, caption }) {
+    const out = await sendToNdrf(buffer, filename, caption)
+    const r = sessionId && alertId ? findByAlert(sessionId, alertId) : null
+    if (r) {
+      r.ndrf = { status: out.ok ? 'sent' : 'failed', how: 'operator', at: new Date(now()).toISOString(), note: out.note, filename }
+      event(r, out.ok ? 'Operator sent the advisory report to the NDRF bot.' : `NDRF send failed: ${out.note}`, out.ok ? 'ok' : 'warn')
+    }
+    return out
+  }
+
   /** The Sarpanch's decision. Single-use: only the first one counts. */
   async function decide(id, decision, via) {
     const r = records.get(id)
@@ -194,6 +248,7 @@ export function createEscalation({ env, dispatch, fetchFn = fetch, now = () => D
     r.status = 'escalating'; r.escalatedAt = now()
     event(r, `Sarpanch confirmed the alert (via ${via}). Escalating to citizens in the evacuation zone.`, 'ok')
     await syncTelegram(r, `✅ ${r.village}: escalated (via ${via}). Citizens in the evacuation zone are being called.`)
+    void notifyNdrf(r, 'automatic')
     const msgs = { hi: r.citizen.hi, en: r.citizen.en }
     const fallback = citizenMessages({ village: r.village, hours: r.horizonHours })
     const hi = msgs.hi || fallback.hi, en = msgs.en || fallback.en
@@ -234,11 +289,11 @@ export function createEscalation({ env, dispatch, fetchFn = fetch, now = () => D
     return { ok: true, message: `Escalation recorded but the citizen call ${result.status}.` }
   }
 
-  const findByAlert = (sessionId, alertId) => { const id = byKey.get(`${sessionId}:${alertId}`); return id ? records.get(id) : null }
+  function findByAlert(sessionId, alertId) { const id = byKey.get(`${sessionId}:${alertId}`); return id ? records.get(id) : null }
   const findByAlertId = alertId => [...records.values()].find(r => r.alertId === alertId) ?? null
 
   return {
-    open, decide, startPolling, view,
+    open, decide, startPolling, view, setReportInput, manualNdrf,
     status: id => { const r = records.get(id); return r ? view(r) : null },
     statusByAlert: (sessionId, alertId) => { const r = findByAlert(sessionId, alertId); return r ? view(r) : null },
     /** Call provider webhook: { escalation_id | metadata.incident_id, response: "1" | "yes" | "2" | "no" }. */

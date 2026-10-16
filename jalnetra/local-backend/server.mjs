@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { publicStatus, runOnce, startMonitor, state as monitorState } from './monitor.mjs'
 import { createEscalation } from './escalation.mjs'
+import { buildNdrfPdfBytes } from '../src/report/ndrfReport.ts'
 import { PGlite } from '@electric-sql/pglite'
 import { PGLiteSocketServer } from '@electric-sql/pglite-socket'
 
@@ -40,6 +41,7 @@ const escalation = createEscalation({
   env: E, dispatch: dispatchAlert, file: join(here, 'data', 'escalations.json'), dryRun: E.ESCALATION_DRY_RUN === '1',
   log: (...a) => console.log(new Date().toISOString().slice(11, 19), 'escalation:', ...a),
   requestIdFor: r => dispatchRefs.get(`demo-${r.alertId}`) ?? null,
+  buildPdf: input => buildNdrfPdfBytes(input),
 })
 escalation.resumePending()
 // ---- Listen in Hindi: local text-to-speech (Microsoft Edge neural voice). Replaces Amazon Polly; no AWS involved. ----
@@ -119,6 +121,25 @@ createServer(async (req, res) => {
     if (req.method === 'GET' && m) { const v = escalation.status(m[1]); return v ? sendJson(res, 200, v) : sendJson(res, 404, { error: 'Not found' }) }
     const a = u.pathname.match(/^\/escalation\/by-alert\/([0-9a-f-]{36})\/([0-9a-f-]{36})$/)
     if (req.method === 'GET' && a) { const v = escalation.statusByAlert(a[1], a[2]); return v ? sendJson(res, 200, v) : sendJson(res, 404, { error: 'Not found' }) }
+    if (req.method === 'POST' && u.pathname === '/escalation/report-input') {
+      // The page posts the report data at approval; the server builds and sends the PDF the moment the alert is escalated.
+      const chunks = []; let size = 0
+      for await (const c of req) { size += c.length; if (size > 8 * 1024 * 1024) return sendJson(res, 413, { error: 'too large' }); chunks.push(c) }
+      const sessionId = u.searchParams.get('sessionId') ?? '', alertId = u.searchParams.get('alertId') ?? ''
+      if (!/^[0-9a-f-]{36}$/.test(sessionId) || !/^[0-9a-f-]{36}$/.test(alertId)) return sendJson(res, 400, { error: 'invalid ids' })
+      try { escalation.setReportInput(sessionId, alertId, JSON.parse(Buffer.concat(chunks).toString('utf8'))) } catch { return sendJson(res, 400, { error: 'invalid JSON' }) }
+      return sendJson(res, 200, { ok: true })
+    }
+    if (req.method === 'POST' && u.pathname === '/escalation/ndrf-send') {
+      const chunks = []; let size = 0
+      for await (const c of req) { size += c.length; if (size > 12 * 1024 * 1024) return sendJson(res, 413, { error: 'file too large' }); chunks.push(c) }
+      const buffer = Buffer.concat(chunks)
+      if (buffer.length < 1000 || buffer.subarray(0, 4).toString('latin1') !== '%PDF') return sendJson(res, 400, { error: 'a PDF file is required' })
+      const q = k => String(u.searchParams.get(k) ?? '')
+      const filename = (q('name') || 'NDRF-flood-advisory.pdf').replace(/[^\w.\- ]/g, '_').slice(0, 80)
+      const out = await escalation.manualNdrf({ sessionId: /^[0-9a-f-]{36}$/.test(q('sessionId')) ? q('sessionId') : '', alertId: /^[0-9a-f-]{36}$/.test(q('alertId')) ? q('alertId') : '', buffer, filename, caption: q('caption') || 'JalNetra flood advisory for NDRF' })
+      return sendJson(res, out.ok ? 200 : 502, out.ok ? { ok: true, to: 'NDRF bot' } : { error: out.note })
+    }
     if (req.method === 'POST' && u.pathname === '/escalation/call-result') {
       let raw = ''; for await (const c of req) { raw += c; if (raw.length > 8000) break }
       let b = {}; try { b = JSON.parse(raw || '{}') } catch {}

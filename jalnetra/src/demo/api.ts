@@ -119,6 +119,8 @@ export interface EscalationView {
   sarpanch: { phone: string | null; call: { status: string } }
   citizen: { phone: string | null; call: { status: string; note: string | null } | null }
   channels: { telegram: boolean; callWebhook: boolean }
+  ndrf: { status: string; how: string; at: string; note: string | null } | null
+  ndrfConfigured: boolean
   citizenMessage: { hi: string | null; en: string | null }
   events: EscalationEvent[]
 }

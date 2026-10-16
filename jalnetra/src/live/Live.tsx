@@ -16,7 +16,7 @@ import { HORIZONS, eventInputs, runModel, type Level, type ModelRun, type Villag
 import { liveInputs } from '../engine/sources'
 import { bounds, extentAt, loadTerrain, type Extent, type Terrain } from '../engine/terrain'
 import { buildGraph, evacuate, impactStats, type Route } from '../engine/route'
-import { approveIncident, createIncident, hasKey, listRuns, type RunSummary, listAlerts, listContacts, saveKey, sendAlerts, setStatus, type Alert, type Contact, type Incident } from '../ops'
+import { API, approveIncident, createIncident, hasKey, listRuns, type RunSummary, listAlerts, listContacts, saveKey, sendAlerts, setStatus, type Alert, type Contact, type Incident } from '../ops'
 import { FONT, HLABEL, LEVEL_RGB, M, VBY, VILLAGES, citizenAlert, fmtIST, fmtQ, englishAlert, hindiAlert, impactText, windowText } from './shared'
 import { VILLAGES as EXERCISE_IDS, DemoApiError, approveAlert, createSession, getEscalation, getSession, type EscalationView } from '../demo/api'
 import { approvalKey, readAttempt, writeAttempt } from '../demo/workflowState'
@@ -33,6 +33,7 @@ import type { PointStatus, RiverPoint, Status } from '../engine/india'
 import { SPREAD_CLOCK, REACH_HALF_KM, buildTownSpread, townFacts, townImage, type TownFacts } from '../floodSpread/townSpread'
 import { EVAC_BUFFER_CELLS, placePhones, townZone } from '../floodSpread/zone'
 import { FALLBACK_DENSITY_PER_KM2, PHONES_PER_PERSON, zonePopulation } from '../floodSpread/population'
+import { buildNdrfReport, renderReportMap, type NdrfInput } from '../report/ndrfReport'
 
 type Mode = 'live' | 'demo'
 type AlertState = { stage: 'review' | 'approving' | 'calling' | 'contacted' | 'evacuating' | 'resolved' | 'dismissed' | 'error'; incident?: Incident; approved?: boolean; error?: string; telephony?: string; esc?: { sessionId: string; alertId: string } }
@@ -348,6 +349,41 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
       if (p >= 1) clearInterval(id)
     }, 80)
   }
+  const KIND: Record<string, string> = { h: 'Hospital', s: 'School', c: 'College' }
+  const km = (a: [number, number], b: [number, number]) => { const r = Math.PI / 180, dy = (b[1] - a[1]) * 111.32, dx = (b[0] - a[0]) * 111.32 * Math.cos(((a[1] + b[1]) / 2) * r); return Math.hypot(dx, dy) }
+  /** NDRF advisory report: everything in it is read from the current model run and the zones on the map. */
+  const collectNdrf = async (esc: { status: string; via: string | null } | null): Promise<NdrfInput> => {
+    if (!spread || !terrain || !selTown || !zone || !evac || !selR) throw new Error('Open a town first.')
+    const v = selTown
+    const selPeople = popNow?.total ?? Math.round(evac.areaKm2 * FALLBACK_DENSITY_PER_KM2)
+    const dens = evac.areaKm2 > 0 ? selPeople / evac.areaKm2 : FALLBACK_DENSITY_PER_KM2
+    const horizons = HORIZONS.map(hh => {
+      const f = townZone(spread, terrain, v, hh), e = townZone(spread, terrain, v, hh, 'evac')
+      const people = hh === h ? selPeople : Math.round(e.areaKm2 * dens)
+      return { h: hh, floodKm2: f.areaKm2, evacKm2: e.areaKm2, people, phones: Math.round(people * PHONES_PER_PERSON) }
+    })
+    const evac24 = townZone(spread, terrain, v, 24, 'evac')
+    const shelters = M.pois.map(p => ({ p: [p.x, p.y] as [number, number], name: p.n, kind: KIND[p.a] ?? 'Shelter', km: km([v.lng, v.lat], [p.x, p.y]), dry: !evac24.contains(p.x, p.y) }))
+      .sort((a, b) => a.km - b.km).slice(0, 8)
+    const villages = VILLAGES.filter(x => x.id !== v.id && evac.contains(x.lng, x.lat)).map(x => {
+      const rk = spreadRun.villages.find(q => q.id === x.id)
+      return { name: x.name, level: rk?.level ?? 'LOW', probPct: Math.round((rk?.pAt[h] ?? 0) * 100), arrivalH: rk?.impactH ?? null }
+    }).sort((a, b) => b.probPct - a.probPct)
+    const rt = routes.get(v.id) ?? null
+    const mapPng = renderReportMap({ village: [v.lng, v.lat], flood: zone.polygons, evac: evac.polygons, shelters: shelters.map(s => ({ p: s.p, dry: s.dry, name: s.name })) })
+    return ({
+      generatedAt: new Date(), source: spreadSource === 'live' && liveOk ? 'live' : 'replay', dataClock: spreadSource === 'live' && liveOk ? null : new Date(Date.parse(SPREAD_CLOCK)),
+      modelVersion: M.version,
+      village: { name: v.name, district: v.district, lat: v.lat, lng: v.lng },
+      risk: { level: selR.level, probPct: Math.round(selR.pMax * 100), score: selR.score, conf: selR.conf, action: selR.action, arrivalH: spread.arrival.get(v.id) ?? selR.impactH, factors: selR.factors.map(f => ({ label: f.label, detail: f.detail, pts: f.pts, max: f.max })) },
+      selectedHorizon: h, horizons,
+      population: { people: selPeople, floodPeople: Math.round(zone.areaKm2 * dens), phones: Math.round(selPeople * PHONES_PER_PERSON), source: popNow?.source === 'worldpop' ? 'WorldPop 2020 (live API)' : `density estimate, ${FALLBACK_DENSITY_PER_KM2} people per km2`, phonesPerPerson: PHONES_PER_PERSON },
+      route: rt ? { shelter: rt.shelter.n, km: rt.km, roadKm: rt.roadKm, ok: rt.ok, carMin: real.drive?.minutes ?? null, walkMin: real.walk?.minutes ?? null } : null,
+      shelters: shelters.map(s => ({ name: s.name, kind: s.kind, km: s.km, dry: s.dry })),
+      villages, escalation: esc, mapPng,
+    })
+  }
+  const buildNdrf = async (esc: { status: string; via: string | null } | null) => buildNdrfReport(await collectNdrf(esc))
   if (townLayer && selTown) {
     const hzText = h === 0 ? 'now' : `+${h} h`
     L.push(new BitmapLayer({ id: `town-river-${selTown.id}`, image: townLayer.canvas, bounds: townLayer.bounds, opacity: 0.95, textureParameters: { minFilter: 'nearest', magFilter: 'nearest' } as any }))
@@ -516,7 +552,7 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
 
       {/* ---------- right: alert queue or village ---------- */}
       {run && (selR || queue.length > 0 || detail) && <aside id="live-right-panel" className={'lpanel right' + (showRightPanel ? ' panel-visible' : ' panel-hidden')}>
-        {selR ? <VillagePanel r={selR} route={routes.get(selR.id) ?? null} run={run} mode={mode} h={h} st={alerts[selR.id]} setSt={s => setAlerts(a => ({ ...a, [selR.id]: { ...(a[selR.id] ?? {}), ...s } as AlertState }))} onClose={closeSel} onOpenIncident={onOpenIncident} exercise={exerciseIds.has(selR.id)} googleDrive={gDrive} realInfo={real} townInfo={townInfo} zoneInfo={zone && evac && selTown ? { floodKm2: zone.areaKm2, evacKm2: evac.areaKm2, population: popNow?.total ?? null, phones, loading: !!popNow?.loading, source: popNow?.source ?? 'estimate', error: popNow?.error, progress: bcP, icons: phonePts.length } : null} spreadUi={{ source: spreadSource, setSource: setSpreadSource, liveOk, showFlood, setShowFlood, showEvac, setShowEvac, showPhones, setShowPhones }} onBroadcast={startBroadcast} />
+        {selR ? <VillagePanel r={selR} route={routes.get(selR.id) ?? null} run={run} mode={mode} h={h} st={alerts[selR.id]} setSt={s => setAlerts(a => ({ ...a, [selR.id]: { ...(a[selR.id] ?? {}), ...s } as AlertState }))} onClose={closeSel} onOpenIncident={onOpenIncident} exercise={exerciseIds.has(selR.id)} googleDrive={gDrive} realInfo={real} buildNdrf={selTown && zone && evac ? buildNdrf : undefined} collectNdrf={selTown && zone && evac ? collectNdrf : undefined} townInfo={townInfo} zoneInfo={zone && evac && selTown ? { floodKm2: zone.areaKm2, evacKm2: evac.areaKm2, population: popNow?.total ?? null, phones, loading: !!popNow?.loading, source: popNow?.source ?? 'estimate', error: popNow?.error, progress: bcP, icons: phonePts.length } : null} spreadUi={{ source: spreadSource, setSource: setSpreadSource, liveOk, showFlood, setShowFlood, showEvac, setShowEvac, showPhones, setShowPhones }} onBroadcast={startBroadcast} />
           : <AlertQueue exerciseIds={exerciseIds} queue={queue} alerts={alerts} onView={pick} onDismiss={id => setAlerts(a => ({ ...a, [id]: { stage: 'dismissed' } }))} onOpenIncident={onOpenIncident} mode={mode} />}
         {stats && detail && <section>
           <div className="kicker">Potentially affected at {HLABEL[h]}</div>
@@ -698,7 +734,7 @@ function AlertQueue({ exerciseIds, queue, alerts, onView, onDismiss, onOpenIncid
   )
 }
 
-function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncident, exercise, googleDrive, realInfo, townInfo, zoneInfo, spreadUi, onBroadcast }: { townInfo?: TownFacts | null; zoneInfo?: ZoneUi | null; spreadUi?: SpreadUi; onBroadcast?: () => void; googleDrive?: { km: number; minutes: number } | null; realInfo?: { walk: { km: number; minutes: number } | null; drive: { km: number; minutes: number } | null; busy: boolean; note: string }; exercise: boolean; r: VillageRisk; route: Route | null; run: ModelRun; mode: Mode; h: number; st?: AlertState; setSt: (s: Partial<AlertState>) => void; onClose: () => void; onOpenIncident: (id: string) => void }) {
+function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncident, exercise, googleDrive, realInfo, townInfo, zoneInfo, spreadUi, onBroadcast, buildNdrf, collectNdrf }: { collectNdrf?: (esc: { status: string; via: string | null } | null) => Promise<NdrfInput>; buildNdrf?: (esc: { status: string; via: string | null } | null) => Promise<{ blob: Blob; filename: string }>; townInfo?: TownFacts | null; zoneInfo?: ZoneUi | null; spreadUi?: SpreadUi; onBroadcast?: () => void; googleDrive?: { km: number; minutes: number } | null; realInfo?: { walk: { km: number; minutes: number } | null; drive: { km: number; minutes: number } | null; busy: boolean; note: string }; exercise: boolean; r: VillageRisk; route: Route | null; run: ModelRun; mode: Mode; h: number; st?: AlertState; setSt: (s: Partial<AlertState>) => void; onClose: () => void; onOpenIncident: (id: string) => void }) {
   const v = VBY.get(r.id)!
   const [why, setWhy] = useState(false)
   const [review, setReview] = useState(false)
@@ -727,6 +763,14 @@ function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncide
     impact_time: r.impactH === null ? 'not within 48 hours' : r.impactH === 0 ? 'water predicted now' : `about ${r.impactH} hours (window ${windowText(r)})`,
     route: route ? `${route.km.toFixed(1)} km to ${route.shelter.n}, ${route.roadKm.toFixed(1)} km of it on roads. ${route.why}` : 'no dry shelter found within 30 km', model_updated: fmtIST(run.at), simulated: mode === 'demo' || exercise,
   }
+  /** Hand the server the report data so the NDRF team is notified the moment the Sarpanch escalates, even by phone. */
+  const shareReportData = async (sessionId: string, alertId: string) => {
+    if (!collectNdrf) return
+    try {
+      const input = await collectNdrf(null)
+      await fetch(`${API}/escalation/report-input?sessionId=${encodeURIComponent(sessionId)}&alertId=${encodeURIComponent(alertId)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) })
+    } catch { /* the operator can still send the file by hand */ }
+  }
   const approveExercise = async () => {
     setSt({ stage: 'approving', error: undefined })
     let key = '', requestId = '', horizon: Horizon = 6
@@ -736,7 +780,7 @@ function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncide
       if (!a) throw new Error('This village is not part of the exercise session.')
       key = approvalKey(session.id, a.id)
       horizon = (HORIZON_SET.includes(h) ? h : 6) as Horizon
-      if (a.approvalStatus === 'approved') { setSt({ ...exerciseOutcome(a, session.demoDestination.masked), esc: { sessionId: session.id, alertId: a.id } }); return }
+      if (a.approvalStatus === 'approved') { setSt({ ...exerciseOutcome(a, session.demoDestination.masked), esc: { sessionId: session.id, alertId: a.id } }); void shareReportData(session.id, a.id); return }
       const prior = readAttempt(key)
       if (prior && (prior.state === 'inflight' || prior.state === 'unknown')) throw new Error('An earlier approval of this alert was not confirmed. It will not be repeated; refresh to reconcile.')
       requestId = prior?.requestId ?? crypto.randomUUID()
@@ -746,6 +790,7 @@ function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncide
       const res = await approveAlert(session.id, a.id, requestId, horizon, { hi: msg, en: englishAlert(v.name, r, route, mode === 'demo') }, citizen)
       writeAttempt(key, { requestId, horizon, state: 'settled' })
       setSt({ ...exerciseOutcome(res.alert, session.demoDestination.masked), esc: { sessionId: session.id, alertId: a.id } })
+      void shareReportData(session.id, a.id)
     } catch (e) {
       if (requestId && key) { try { writeAttempt(key, { requestId, horizon, state: e instanceof DemoApiError && e.ambiguous ? 'unknown' : 'rejected' }) } catch { /* storage unavailable */ } }
       const message = (e as Error).message
@@ -816,7 +861,11 @@ function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncide
         </> : <p className="note">No school or hospital that stays dry within 30 km without crossing a river.</p>}
       </section>
 
-      {route && <RouteShare v={v} r={r} route={route} exercise={exercise} />}
+      {route && <RouteShare v={v} r={r} route={route} exercise={exercise} ndrfIds={st?.esc} ndrf={buildNdrf ? async () => {
+        let e: { status: string; via: string | null } | null = null
+        if (st?.esc) { try { const x = await getEscalation(st.esc.sessionId, st.esc.alertId); if (x) e = { status: x.status, via: x.decidedVia } } catch { /* report without it */ } }
+        return buildNdrf(e)
+      } : undefined} />}
 
       {/* ---- human in the loop ---- */}
       {(exercise || r.level === 'HIGH' || r.level === 'CRITICAL' || r.level === 'MEDIUM') && <div className="approve">
@@ -925,13 +974,12 @@ function EscalationTracker({ esc }: { esc: { sessionId: string; alertId: string 
   const [, tick] = useState(0)
   useEffect(() => {
     let alive = true, timer: ReturnType<typeof setTimeout> | undefined
-    const done = new Set(['escalated', 'rejected', 'expired', 'failed'])
     const load = async () => {
       try {
         const x = await getEscalation(esc.sessionId, esc.alertId)
         if (!alive) return
         setV(x); setErr(null)
-        if (x && done.has(x.status) && x.citizen.call?.status !== undefined) return
+        if (x && (x.status === 'rejected' || x.status === 'expired' || x.status === 'failed' || (x.status === 'escalated' && x.ndrf && x.citizen.call))) return
       } catch (e) { if (alive) setErr((e as Error).message) }
       timer = setTimeout(load, 1500)
     }
@@ -945,7 +993,7 @@ function EscalationTracker({ esc }: { esc: { sessionId: string; alertId: string 
   const waiting = v.status === 'awaiting_sarpanch'
   const escalated = v.status === 'escalated' || v.status === 'escalating'
   const banner = escalated
-    ? { cls: 'go', icon: <FiCheckCircle />, title: 'ESCALATED', text: `Sarpanch confirmed${v.decidedVia ? ` via ${v.decidedVia}` : ''}. ${v.citizen.call?.status === 'sent' ? 'Citizens in the zone are being called.' : v.status === 'escalating' ? 'Calling the citizens…' : 'Citizen call: ' + (v.citizen.call?.status ?? 'pending')}` }
+    ? { cls: 'go', icon: <FiCheckCircle />, title: 'ESCALATED', text: `Sarpanch confirmed${v.decidedVia ? ` via ${v.decidedVia}` : ''}. ${v.citizen.call?.status === 'sent' ? 'Citizens in the zone are being called.' : v.status === 'escalating' ? 'Calling the citizens…' : 'Citizen call: ' + (v.citizen.call?.status ?? 'pending')}${v.ndrf?.status === 'sent' ? ' The NDRF team has the advisory report.' : ''}` }
     : v.status === 'rejected' ? { cls: 'no', icon: <FiX />, title: 'REJECTED: FALSE ALARM', text: `Sarpanch rejected${v.decidedVia ? ` via ${v.decidedVia}` : ''}. Nobody else is contacted.` }
     : v.status === 'expired' ? { cls: 'no', icon: <FiAlertTriangle />, title: 'EXPIRED', text: 'No decision in time. Nothing was escalated.' }
     : v.status === 'failed' ? { cls: 'no', icon: <FiAlertTriangle />, title: 'ESCALATION FAILED', text: v.citizen.call?.note ?? 'The citizen call could not be placed.' }
@@ -957,6 +1005,8 @@ function EscalationTracker({ esc }: { esc: { sessionId: string; alertId: string 
       : v.status === 'rejected' ? { label: 'Sarpanch rejected: false alarm', state: 'no', detail: `Via ${v.decidedVia ?? 'reply'}.` }
       : v.status === 'expired' ? { label: 'No decision in time', state: 'no' }
       : { label: 'Sarpanch confirmed the alert', state: 'ok', detail: `Via ${v.decidedVia ?? 'reply'}.` },
+    { label: 'NDRF team notified', state: v.ndrf ? (v.ndrf.status === 'sent' || v.ndrf.status === 'dry_run' ? 'ok' : 'no') : escalated ? 'wait' : 'idle',
+      detail: v.ndrf ? `${v.ndrf.how === 'automatic' ? 'Automatic on escalation' : 'Sent by the operator'}: ${v.ndrf.status === 'sent' ? 'advisory report delivered to the NDRF bot.' : v.ndrf.note ?? v.ndrf.status}` : escalated ? 'Building and sending the advisory report…' : 'The advisory report is sent automatically when the alert is escalated.' },
     { label: `Citizens in the zone called${v.citizen.phone ? ` (${v.citizen.phone})` : ''}`, state: escalated || v.status === 'failed' ? (v.citizen.call?.status === 'sent' ? 'ok' : v.status === 'escalating' ? 'wait' : 'no') : 'idle', detail: escalated ? (v.citizen.call?.status === 'sent' ? 'One urgent line, male voice. Dispatched, not confirmed answered.' : v.citizen.call?.note ?? '') : 'Only after the Sarpanch confirms.' },
   ]
   return (
@@ -977,7 +1027,8 @@ function EscalationTracker({ esc }: { esc: { sessionId: string; alertId: string 
   )
 }
 
-function RouteShare({ v, r, route, exercise }: { v: { name: string; district?: string; lat: number; lng: number }; r: VillageRisk; route: Route; exercise: boolean }) {
+function RouteShare({ v, r, route, exercise, ndrf, ndrfIds }: { v: { name: string; district?: string; lat: number; lng: number }; r: VillageRisk; route: Route; exercise: boolean; ndrfIds?: { sessionId: string; alertId: string }; ndrf?: () => Promise<{ blob: Blob; filename: string }> }) {
+  const [nd, setNd] = useState<{ state: 'idle' | 'busy' | 'ready' | 'sending' | 'sent' | 'failed'; msg?: string }>({ state: 'idle' })
   const [copied, setCopied] = useState(false)
   const [audio, setAudio] = useState('')
   const [draft, setDraft] = useState<Draft | null>(null)
@@ -1037,6 +1088,32 @@ function RouteShare({ v, r, route, exercise }: { v: { name: string; district?: s
       <div className="kicker mt">Send the route to the village head</div>
       <button className="share-primary" onClick={() => void sendTelegram()} disabled={tg === 'sending'}><FiSend /> {tg === 'sending' ? 'Sending…' : tg === 'sent' ? 'Sent on Telegram ✓' : 'Send on Telegram'}</button>
       <p className="share-hint">Sends the village, risk, safe place and a link that opens the route (and AR on a phone).</p>
+      {ndrf && <div className="ndrf-box">
+        <div className="kicker">NDRF advisory report</div>
+        <p className="share-hint">A detailed PDF for the response force: affected areas and villages, nearest shelters, evacuation route and the rescue teams, boats and camps this needs.</p>
+        <div className="ndrf-actions">
+          <button className="share-primary ndrf-main" disabled={nd.state === 'busy' || nd.state === 'sending'} onClick={async () => {
+            setNd({ state: 'busy' })
+            try {
+              const { blob, filename } = await ndrf()
+              const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; document.body.appendChild(a); a.click(); a.remove()
+              setTimeout(() => URL.revokeObjectURL(a.href), 4000)
+              setNd({ state: 'ready', msg: `Downloaded ${filename}` })
+            } catch (e) { setNd({ state: 'failed', msg: (e as Error).message }) }
+          }}><FiCamera /> {nd.state === 'busy' ? 'Building the report…' : 'Generate NDRF report (PDF)'}</button>
+          <button className="btn-ghost ndrf-send" disabled={nd.state === 'busy' || nd.state === 'sending'} onClick={async () => {
+            setNd({ state: 'sending' })
+            try {
+              const { blob, filename } = await ndrf()
+              const res = await fetch(`${API}/escalation/ndrf-send?${ndrfIds ? `sessionId=${ndrfIds.sessionId}&alertId=${ndrfIds.alertId}&` : ''}name=${encodeURIComponent(filename)}&caption=${encodeURIComponent(`JalNetra flood advisory: ${v.name}${v.district ? ', ' + v.district : ''} (${r.level})`)}`, { method: 'POST', headers: { 'content-type': 'application/pdf' }, body: blob })
+              const b = await res.json().catch(() => ({}))
+              if (!res.ok) throw new Error(b.error || `Send failed (${res.status})`)
+              setNd({ state: 'sent', msg: `Sent to the ${b.to ?? 'NDRF bot'} on Telegram` })
+            } catch (e) { setNd({ state: 'failed', msg: (e as Error).message }) }
+          }}><FiSend /> {nd.state === 'sending' ? 'Sending…' : nd.state === 'sent' ? 'Sent to NDRF ✓' : 'Send file to NDRF now'}</button>
+        </div>
+        {nd.msg && <p className={nd.state === 'failed' ? 'err' : 'share-hint'}>{nd.state === 'failed' && <FiAlertTriangle />} {nd.msg}</p>}
+      </div>}
       <div className="share-grid">
         <a href={link} target="_blank" rel="noreferrer"><FiCamera /> Open route</a>
         <a href={mapsLink(shared)} target="_blank" rel="noreferrer"><FiExternalLink /> Google Maps</a>

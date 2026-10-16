@@ -111,3 +111,9 @@
 .esc-log li { display: grid; grid-template-columns: 62px 1fr; gap: 8px; font-size: 11.5px; line-height: 1.35; padding: 5px 8px; border-radius: 8px; background: rgba(148,163,184,.1); }
 .esc-log time { color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .esc-log li.ok { background: rgba(22,163,74,.1); } .esc-log li.warn { background: rgba(245,158,11,.12); }
+
+.ndrf-box { margin: 12px 0 4px; padding: 12px; border-radius: 14px; border: 1px solid #cfe0d4; background: #f4faf5; }
+.ndrf-actions { display: grid; gap: 8px; margin-top: 8px; }
+.ndrf-main { width: 100%; }
+.ndrf-send { width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 12px; border: 1px solid #0f3d2e; border-radius: 12px; font-weight: 700; color: #0f3d2e; background: #fff; cursor: pointer; }
+.ndrf-send:disabled { opacity: .6; cursor: progress; }

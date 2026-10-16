@@ -151,3 +151,68 @@ test('"two" is recorded as heard-the-message and does not decide', async () => {
   assert.equal(s.status, 'awaiting_sarpanch')
   assert.equal(s.acknowledged, true)
 })
+
+const NDRF_ENV = { ...ENV, NDRF_TELEGRAM_BOT_TOKEN: 'ndrf-token', NDRF_TELEGRAM_CHAT_ID: '99' }
+const reportInput = { dataClock: null, village: { name: 'Harpur' } }
+
+test('escalating sends the advisory report to the NDRF bot automatically, once', async () => {
+  const docs = []
+  const dispatch = async () => ({ status: 'sent', providerRef: 'r', error: null })
+  const fetchFn = async (url, init) => {
+    if (String(url).includes('/sendDocument')) { docs.push({ url: String(url), chat: init.body.get('chat_id'), file: init.body.get('document').name, caption: init.body.get('caption') }) }
+    return { json: async () => ({ ok: true, result: { message_id: 1 } }) }
+  }
+  const buildPdf = input => ({ bytes: new TextEncoder().encode('%PDF-test').buffer, filename: `r-${input.village.name}.pdf` })
+  const svc = createEscalation({ env: NDRF_ENV, dispatch, fetchFn, log() {}, pollMs: 1, buildPdf })
+  svc.setReportInput(ids.sessionId, ids.alertId, reportInput)
+  const v = await svc.open({ ...ids, village: 'Harpur', district: 'Gopalganj' })
+  await svc.decide(v.id, 'escalate', 'the call')
+  await new Promise(r => setTimeout(r, 40))
+  svc.stop()
+  assert.equal(docs.length, 1)
+  assert.match(docs[0].url, /botndrf-token\/sendDocument/)
+  assert.equal(docs[0].chat, '99')
+  assert.equal(docs[0].file, 'r-Harpur.pdf')
+  const s = svc.status(v.id)
+  assert.equal(s.ndrf.status, 'sent')
+  assert.equal(s.ndrf.how, 'automatic')
+  assert.ok(s.events.some(e => /NDRF team notified/.test(e.text)))
+})
+
+test('a reject never contacts the NDRF bot', async () => {
+  let docs = 0
+  const dispatch = async () => ({ status: 'sent', providerRef: 'r', error: null })
+  const fetchFn = async url => { if (String(url).includes('/sendDocument')) docs++; return { json: async () => ({ ok: true, result: { message_id: 1 } }) } }
+  const svc = createEscalation({ env: NDRF_ENV, dispatch, fetchFn, log() {}, pollMs: 1, buildPdf: () => ({ bytes: new ArrayBuffer(10), filename: 'x.pdf' }) })
+  svc.setReportInput(ids.sessionId, ids.alertId, reportInput)
+  const v = await svc.open({ ...ids, village: 'Harpur' })
+  await svc.decide(v.id, 'reject', 'Telegram')
+  await new Promise(r => setTimeout(r, 30))
+  svc.stop()
+  assert.equal(docs, 0)
+  assert.equal(svc.status(v.id).ndrf, null)
+})
+
+test('missing report data is reported, not hidden', async () => {
+  const dispatch = async () => ({ status: 'sent', providerRef: 'r', error: null })
+  const fetchFn = async () => ({ json: async () => ({ ok: true, result: { message_id: 1 } }) })
+  const svc = createEscalation({ env: NDRF_ENV, dispatch, fetchFn, log() {}, pollMs: 1, buildPdf: () => ({ bytes: new ArrayBuffer(10), filename: 'x.pdf' }) })
+  const v = await svc.open({ ...ids, village: 'Harpur' })
+  await svc.decide(v.id, 'escalate', 'the call')
+  await new Promise(r => setTimeout(r, 30))
+  svc.stop()
+  assert.equal(svc.status(v.id).ndrf.status, 'no_report')
+})
+
+test('the operator can send the file by hand and it shows in the live log', async () => {
+  const sent = []
+  const dispatch = async () => ({ status: 'sent', providerRef: 'r', error: null })
+  const fetchFn = async (url, init) => { if (String(url).includes('/sendDocument')) sent.push(init.body.get('document').name); return { json: async () => ({ ok: true, result: { message_id: 1 } }) } }
+  const svc = createEscalation({ env: NDRF_ENV, dispatch, fetchFn, log() {}, pollMs: 1 })
+  const v = await svc.open({ ...ids, village: 'Harpur' })
+  const out = await svc.manualNdrf({ ...ids, buffer: Buffer.from('%PDF-1.3 ' + 'x'.repeat(1200)), filename: 'manual.pdf', caption: 'c' })
+  svc.stop()
+  assert.equal(out.ok, true)
+  assert.deepEqual(sent, ['manual.pdf'])
+  assert.equal(svc.status(v.id).ndrf.how, 'operator')
+})

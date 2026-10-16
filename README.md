@@ -43,6 +43,7 @@
 | **Count** | Estimated people and mobile phones inside the evacuation zone |
 | **Decide** | A person reviews the map and the advisory, then approves or rejects. Nothing is automatic |
 | **Confirm** | The Sarpanch gets a two-way voice call and a Telegram message and says *escalate* or *false alarm* |
+| **Report** | One click builds a detailed **NDRF flood advisory PDF**: affected area and villages, nearest shelters, route, and the rescue teams, boats and camps needed. It can be sent to a Telegram chat |
 | **Warn** | Only after the Sarpanch confirms: a short, urgent Hindi + English call to the citizens in the zone, a 3D evacuation route and an AR arrow to the safe place |
 
 ## How it works
@@ -228,6 +229,7 @@ sequenceDiagram
   participant Sa as Sarpanch phone
   participant T as Telegram
   participant C as Citizen phone
+  participant N as NDRF bot
   Op->>S: Review and approve alert
   S->>Sa: Stage 1 call: advisory, then asks yes / no
   S->>T: Message with Escalate now / Reject buttons
@@ -240,6 +242,7 @@ sequenceDiagram
   alt Escalate
     S->>T: Escalated, buttons removed
     S->>C: Stage 2 call: one urgent line, Hindi then English
+    S->>N: Advisory report (PDF) sent automatically
     S-->>Op: Live banner: ESCALATED
   else Reject
     S->>T: Rejected as false alarm
@@ -260,6 +263,27 @@ sequenceDiagram
 - **One call at a time.** The provider allows 1 concurrent call on this account, so the citizen call retries every 10 s until the Sarpanch call has ended.
 
 More: [`docs/ESCALATION.md`](jalnetra/docs/ESCALATION.md). Method and every parameter: [`docs/FLOOD-SPREAD-REPORT.md`](jalnetra/docs/FLOOD-SPREAD-REPORT.md).
+
+## NDRF advisory report
+
+In the village panel, below *Send on Telegram*, **Generate NDRF report (PDF)** downloads a report built in the browser from the same model output as the map. **Send file to NDRF now** posts the same PDF to the NDRF Telegram bot (`NDRF_TELEGRAM_BOT_TOKEN`, `NDRF_TELEGRAM_CHAT_ID`).
+
+<p align="center"><img src="jalnetra/docs/img/ndrf-report-page1.png" alt="NDRF report, page 1" width="460" /></p>
+
+| Section | Content |
+|---|---|
+| Situation | Village, district, coordinates, risk level, flood probability, when water arrives, recommended action |
+| Forecast | Flood trajectory and evacuation zone area, people and phones at now, +3, +6, +12 and +24 h |
+| Map | Both polygons, shelters (outside or inside the flood) and the village |
+| Affected villages | Tracked villages inside the evacuation zone, with risk and arrival |
+| Shelters and route | Nearest schools, colleges and hospitals with distance and flood status, plus the evacuation route |
+| Rescue estimate | People needing rescue, boats, NDRF teams, relief camps and medical teams, from stated assumptions (10% of people inside the flood need assisted rescue, 160 people per boat, 4 boats per 30-person team, 40% need a camp of 500, 1 medical team per 10,000) |
+| Alert status | Sarpanch decision and whether citizens were called |
+| Method and limits | Data sources and what the model cannot do |
+
+**Two ways to reach the NDRF team.** (1) The operator clicks **Send file to NDRF now**. (2) Automatically: when the Sarpanch escalates, by call or on Telegram, the server builds the report and sends it to the NDRF bot, and the live panel shows a *NDRF team notified* step and a log line. A reject never contacts NDRF.
+
+A sample is in [`docs/samples/`](jalnetra/docs/samples/NDRF-flood-advisory-Harpur.pdf). Code: [`src/report/ndrfReport.ts`](jalnetra/src/report/ndrfReport.ts). The resource figures are a planning estimate, not a deployment order.
 
 ## Parameters used
 
@@ -323,6 +347,7 @@ python event.py cfg.json && python build.py           # per-village evidence and
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Telegram decision buttons and status messages |
 | `MONITOR_INTERVAL_MIN` | River monitor interval (default 180) |
 | `ESCALATION_TTL_MIN`, `ESCALATION_CALL_RETRY_MIN` | Decision window (20) and busy-line retry window (10) |
+| `NDRF_TELEGRAM_BOT_TOKEN`, `NDRF_TELEGRAM_CHAT_ID` | The NDRF Telegram bot and chat that receive the advisory report PDF |
 
 **Tests**
 ```bash
@@ -339,6 +364,7 @@ npx tsc -p tsconfig.app.json --noEmit                    # site type-check
 | `src/engine/` | River forecast, flood probability, terrain, routing |
 | `src/floodSpread/` | Town spread, flood and evacuation polygons ([`zone.ts`](jalnetra/src/floodSpread/zone.ts)), population ([`population.ts`](jalnetra/src/floodSpread/population.ts)) |
 | `src/live/sentinel.ts` | Live Sentinel-1 and Sentinel-2 tiles |
+| `src/report/` | NDRF advisory report (PDF) builder ([`ndrfReport.ts`](jalnetra/src/report/ndrfReport.ts)) |
 | `aws-api/` | Lambda API, river monitor, cached proxy, exercise workflow, with tests |
 | `local-backend/` | Local server, river monitor, **two-stage escalation** ([`escalation.mjs`](jalnetra/local-backend/escalation.mjs)) |
 | `pipeline/` | Python scripts that build the flood data from Sentinel-1, Sentinel-2, DEM and GloFAS |

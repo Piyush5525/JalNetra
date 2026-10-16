@@ -32,6 +32,12 @@ Say it at any moment, even while the advisory is playing:
 Keypad presses are not supported by the voice provider's API (no DTMF), so use voice. Every call decision is mirrored to Telegram
 (buttons removed, outcome posted) and to the site's live log.
 
+## NDRF routing
+When the Sarpanch escalates (by call, Telegram or webhook) the server builds the NDRF advisory report (`src/report/ndrfReport.ts`, run in Node)
+and sends it to the **NDRF bot** (`NDRF_TELEGRAM_BOT_TOKEN`, `NDRF_TELEGRAM_CHAT_ID`) as a PDF. The page posts the report data at approval
+(`POST /escalation/report-input`), so this works even if the browser is closed afterwards. A reject never contacts NDRF. The operator can also
+send the file by hand (`POST /escalation/ndrf-send`). Both appear as a step and a log line in the live panel.
+
 ## Safety
 - Phone numbers come from the server environment only, never from a request.
 - Stage 2 happens only after the Sarpanch said yes. A second tap or a late answer does nothing.

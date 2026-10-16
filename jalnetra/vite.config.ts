@@ -115,6 +115,23 @@ function localApi(env: Record<string, string>, port: number): Plugin {
             const data: any = await r.json()
             return json(res, r.ok ? 200 : 502, r.ok ? { ok: true } : { error: data.description ?? 'Telegram request failed' })
           }
+          if (url.pathname === '/ndrf' && req.method === 'POST') {
+            // The NDRF advisory PDF is sent to the NDRF chat (NDRF_TELEGRAM_CHAT_ID, or the operator chat while demoing).
+            const chat = env.NDRF_TELEGRAM_CHAT_ID || env.TELEGRAM_CHAT_ID
+            if (!env.TELEGRAM_BOT_TOKEN || !chat) return json(res, 503, { error: 'Telegram bot is not configured in .env' })
+            const chunks: Buffer[] = []; let size = 0
+            for await (const c of req) { size += (c as Buffer).length; if (size > 12 * 1024 * 1024) return json(res, 413, { error: 'file too large' }); chunks.push(c as Buffer) }
+            const file = Buffer.concat(chunks)
+            if (file.length < 1000 || file.subarray(0, 4).toString('latin1') !== '%PDF') return json(res, 400, { error: 'a PDF file is required' })
+            const name = String(url.searchParams.get('name') ?? 'NDRF-flood-advisory.pdf').replace(/[^\w.\- ]/g, '_').slice(0, 80)
+            const caption = String(url.searchParams.get('caption') ?? 'JalNetra flood advisory for NDRF').slice(0, 900)
+            const form = new FormData()
+            form.append('chat_id', String(chat)); form.append('caption', caption)
+            form.append('document', new Blob([file], { type: 'application/pdf' }), name)
+            const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendDocument`, { method: 'POST', body: form })
+            const data: any = await r.json().catch(() => ({}))
+            return json(res, r.ok ? 200 : 502, r.ok ? { ok: true, to: env.NDRF_TELEGRAM_CHAT_ID ? 'NDRF chat' : 'operator chat' } : { error: data.description ?? 'Telegram request failed' })
+          }
           json(res, 404, { error: 'not found' })
         } catch (e) { json(res, 500, { error: (e as Error).message }) }
       })
