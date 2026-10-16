@@ -203,13 +203,13 @@ Tested against real Sentinel-1 radar flood maps from the 2026 event, leaving eac
 ```mermaid
 flowchart LR
   OM[Open-Meteo / GloFAS<br/>river forecasts] --> MON
-  subgraph AWS[AWS · ap-south-1]
+  subgraph AWS[AWS - ap-south-1]
     EB[EventBridge Scheduler<br/>every 3 h] --> MON[Lambda<br/>river monitor]
-    MON --> S3[(S3<br/>snapshot · audio)]
+    MON --> S3[(S3<br/>snapshot - audio)]
     S3 --> CF[CloudFront + WAF]
     MON -- rising river --> SNS[SNS<br/>alerts topic]
     APIGW[API Gateway] --> API[Lambda<br/>API]
-    API --> RDS[(RDS PostgreSQL<br/>call ledger · limits)]
+    API --> RDS[(RDS PostgreSQL<br/>call ledger - limits)]
     API --> SM[Secrets Manager]
     API --> BR[Bedrock<br/>drafts advisory]
     API --> PO[Polly<br/>Hindi speech]
@@ -219,7 +219,7 @@ flowchart LR
     PO --> S3
     API --> CW[CloudWatch]
   end
-  CF --> U((Operator · village head))
+  CF --> U((Operator - village head))
   U --> APIGW
   API --> VA[AI voice agent] --> PH((Village head's phone))
 ```
@@ -320,9 +320,9 @@ flowchart LR
   U[Unity Android app<br/>AR + location + weather] -- HTTPS JSON --> G[API Gateway<br/>HTTP API]
   G --> L[Lambda functions]
   L --> D[(DynamoDB<br/>session summaries)]
-  L --> S[(S3<br/>report JSON · PDF · images)]
-  L --> C[Cognito<br/>sign-in · API protection]
-  L --> W[CloudWatch<br/>logs · monitoring]
+  L --> S[(S3<br/>report JSON - PDF - images)]
+  L --> C[Cognito<br/>sign-in - API protection]
+  L --> W[CloudWatch<br/>logs - monitoring]
 ```
 
 | Service | Why it is here | When |
@@ -344,9 +344,9 @@ Sentinel-1 and Sentinel-2 (Microsoft Planetary Computer) · GloFAS river dischar
 
 | Name | GitHub ID | AWS Builder Center Alias |
 |---|---|---|
+| Piyush Agarwal | [GitHub (Piyush5525)](https://github.com/Piyush5525) | @piyush5525 |
 | Swastik Dutt | [GitHub (Swastikkkkk)](https://github.com/Swastikkkkk) | @devswastik |
 | Veer Jain | [GitHub (vjn6805)](https://github.com/vjn6805) | @vjn6805 |
-| Piyush Agarwal | [GitHub (Piyush5525)](https://github.com/Piyush5525) | @piyush5525 |
 
 ---
 
