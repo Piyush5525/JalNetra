@@ -88,30 +88,8 @@ function exerciseOutcome(a: DemoAlert, masked: string | null): Partial<AlertStat
   return { stage: 'error', approved: true, error: 'The call outcome is not confirmed. Do not repeat it; check the provider dashboard.' }
 }
 
-// Exercise alerts: five clearly labelled scenario villages fill the review queue so an operator can rehearse
-// review -> approve or reject -> call. They are never presented as live predictions: each is tagged EXERCISE and its message says so.
-const EXERCISE_LEVELS: [Level, number, number, number][] = [['CRITICAL', 3, 0.84, 82], ['HIGH', 6, 0.68, 71], ['HIGH', 8, 0.62, 66], ['CRITICAL', 2, 0.88, 86], ['HIGH', 12, 0.56, 61]]
-// `arrival` is the model's own flood-front arrival (hours until connected water is within 1 km of the village) from the
-// terrain spread replay; the scripted value is used only until the terrain has loaded.
-function exerciseRisks(arrival?: Map<number, number | null>): VillageRisk[] {
-  return EXERCISE_IDS.flatMap((id, i) => {
-    if (!VBY.has(id)) return []
-    const [level, scripted, pMax, score] = EXERCISE_LEVELS[i]
-    const impactH = arrival?.get(id) ?? scripted
-    const p = Array.from({ length: 49 }, (_, h) => Math.min(pMax, pMax * (0.15 + 0.85 * Math.min(1, h / Math.max(impactH, 1)))))
-    const pAt: Record<number, number> = {}, levelAt: Record<number, Level> = {}
-    for (const hz of HORIZONS) { pAt[hz] = p[hz]; levelAt[hz] = hz >= impactH ? level : hz >= impactH / 2 ? 'MEDIUM' : 'LOW' }
-    return [{
-      id, p, pAt, pMax, impactH, window: [Math.max(0, Math.round(impactH * 0.8 - 1)), Math.round(impactH * 1.2 + 2)] as [number, number], score, level, levelAt, conf: 'Medium' as const,
-      factors: [
-        { label: 'Exercise scenario', pts: 40, max: 45, detail: 'Synthetic replay scenario for rehearsal. Not a live prediction.' },
-        { label: 'Time to impact', pts: 15 * (1 - Math.min(impactH, 24) / 24), max: 15, detail: `~${impactH} h in the scenario` },
-        { label: 'Village exposure', pts: 14, max: 20, detail: 'Low-lying and close to the Gandak channel' },
-      ],
-      terms: [], action: level === 'CRITICAL' ? 'Evacuate now (exercise)' : 'Prepare to evacuate (exercise)',
-    }]
-  })
-}
+// The five exercise towns are real villages of the Gandak model. Their risk, probability, score, factors and impact time come from the
+// model run behind the map (the replayed September 2026 flood, or the live forecast): nothing about them is scripted.
 const incidentApproved = (incident: Incident) => ['approved', 'contacted', 'evacuating', 'resolved', 'verified'].includes(incident.status)
 
 function toCanvas(img: ImageData | null) {
@@ -240,7 +218,14 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
   const spreadRun = spreadSource === 'live' && liveOk ? run! : replayRun
   const spreadTowns = useMemo(() => EXERCISE_IDS.flatMap(id => { const v = VBY.get(id); return v ? [{ id, lat: v.lat, lng: v.lng, ch: v.ch }] : [] }), [])
   const spread = useMemo(() => (mode === 'live' && terrain ? buildTownSpread(terrain, spreadTowns, spreadRun) : null), [mode, terrain, spreadTowns, spreadRun])
-  const exercise = useMemo(() => (mode === 'live' && run ? exerciseRisks(spread?.arrival) : []), [mode, run, spread])
+  const exercise = useMemo(() => (mode === 'live' && spread ? EXERCISE_IDS.flatMap(id => {
+    const v = spreadRun.villages.find(x => x.id === id)
+    if (!v || !spread) return []
+    // the village model's probability and score are kept; the arrival time is the flood front reaching the village in the terrain model
+    const h = spread.arrival.get(id)
+    if (h === null || h === undefined) return [v]
+    return [{ ...v, impactH: h, window: h === 0 ? [0, 0] as [number, number] : [Math.max(0, Math.round(h * 0.8 - 1)), Math.round(h * 1.2 + 2)] as [number, number] }]
+  }) : []), [mode, spread, spreadRun])
   const exerciseIds = useMemo(() => new Set(exercise.map(e => e.id)), [exercise])
   const risk = useMemo(() => new Map([...(run?.villages ?? []), ...exercise].map(v => [v.id, v])), [run, exercise])
   const routes = useMemo(() => {
@@ -256,7 +241,7 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
   const counts = run?.counts[h] ?? { LOW: 291, MEDIUM: 0, HIGH: 0, CRITICAL: 0 }
   const atRiskH = counts.MEDIUM + counts.HIGH + counts.CRITICAL
   // While live data is unavailable the page runs on the bundled replay: those villages are never offered for approval, only the labelled exercise alerts are.
-  const queue = useMemo(() => [...(replayNote ? [] : run?.villages ?? []), ...exercise].filter(v => (v.level === 'HIGH' || v.level === 'CRITICAL') && alerts[v.id]?.stage !== 'dismissed').sort((a, b) => (a.level === b.level ? (a.impactH ?? 99) - (b.impactH ?? 99) : a.level === 'CRITICAL' ? -1 : 1)), [run, alerts, exercise, replayNote])
+  const queue = useMemo(() => [...(replayNote ? [] : (run?.villages ?? []).filter(v => !exerciseIds.has(v.id))), ...exercise].filter(v => (exerciseIds.has(v.id) || v.level === 'HIGH' || v.level === 'CRITICAL') && alerts[v.id]?.stage !== 'dismissed').sort((a, b) => (a.level === b.level ? (a.impactH ?? 99) - (b.impactH ?? 99) : a.level === 'CRITICAL' ? -1 : 1)), [run, alerts, exercise, replayNote])
   const selR = sel ? risk.get(sel) ?? null : null
   const anyApproved = Object.values(alerts).some(a => mode === 'demo' ? ['calling', 'contacted', 'evacuating', 'resolved'].includes(a.stage) : a.approved)
   const anyContacted = Object.values(alerts).some(a => ['contacted', 'evacuating', 'resolved'].includes(a.stage))
@@ -737,7 +722,7 @@ function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncide
     }, [st?.incident?.id, st?.stage, demoMode])
   const maxPts = r.factors.reduce((a, f) => a + f.max, 0)
   const ctx = {
-    place: `${v.name}, ${v.district || 'Bihar'}`, title: `${exercise ? 'EXERCISE: ' : ''}Predicted flood: ${v.name} ${r.level}`, source: exercise ? 'JalNetra exercise scenario (not a live prediction)' : mode === 'demo' ? 'JalNetra prediction on replayed 2026 data (simulation)' : 'JalNetra prediction (GloFAS river model + Open-Meteo rain + terrain)',
+    place: `${v.name}, ${v.district || 'Bihar'}`, title: `Predicted flood: ${v.name} ${r.level}`, source: exercise ? (spreadUi?.source === 'live' ? 'JalNetra prediction (GloFAS river model + Open-Meteo rain + terrain)' : 'JalNetra prediction on the replayed September 2026 flood') : mode === 'demo' ? 'JalNetra prediction on replayed 2026 data (simulation)' : 'JalNetra prediction (GloFAS river model + Open-Meteo rain + terrain)',
     observed: fmtIST(run.now), safe_place: route ? `${route.shelter.n}, ${route.km.toFixed(1)} km away` : 'nearest high ground', village: v.name, risk: `${r.level} (${Math.round(r.pMax * 100)}% flood probability within 24 h)`,
     impact_time: r.impactH === null ? 'not within 48 hours' : r.impactH === 0 ? 'water predicted now' : `about ${r.impactH} hours (window ${windowText(r)})`,
     route: route ? `${route.km.toFixed(1)} km to ${route.shelter.n}, ${route.roadKm.toFixed(1)} km of it on roads. ${route.why}` : 'no dry shelter found within 30 km', model_updated: fmtIST(run.at), simulated: mode === 'demo' || exercise,
@@ -778,7 +763,7 @@ function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncide
     try {
       const why = r.factors.filter(f => f.pts >= 3).map(f => `${f.label}: ${f.detail}`).join('; ')
       const prediction = { level: r.level, p: Math.round(r.pMax * 100) / 100, impactH: r.impactH, window: r.window, score: r.score, conf: r.conf, action: r.action, why, factors: r.factors.map(f => ({ label: f.label, pts: Math.round(f.pts), detail: f.detail })), issued_for: new Date(run.now).toISOString(), model_version: run.version }
-       const created = st?.incident ? { incident: st.incident } : await createIncident({ incident_type: 'river_flood', severity: 'high', source: 'forecast', status: 'alert_created', lat: v.lat, lng: v.lng, confidence: Math.min(1, r.pMax), title: `${exercise ? 'EXERCISE: ' : ''}Predicted flood: ${v.name} ${r.level}, impact ${impactText(r)}`, details: { village: v.name, district: v.district, simulated: exercise, exercise, prediction, route: ctx.route } })
+       const created = st?.incident ? { incident: st.incident } : await createIncident({ incident_type: 'river_flood', severity: 'high', source: 'forecast', status: 'alert_created', lat: v.lat, lng: v.lng, confidence: Math.min(1, r.pMax), title: `Predicted flood: ${v.name} ${r.level}, impact ${impactText(r)}`, details: { village: v.name, district: v.district, simulated: exercise, exercise, prediction, route: ctx.route } })
        setSt({ incident: created.incident, approved: st?.approved || incidentApproved(created.incident) })
        const inc = await approveIncident(created.incident, `Approved by operator after review. ${why}`)
        // Resolving approveIncident is the approval evidence, even when the API
@@ -803,7 +788,7 @@ function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncide
         <div className="vp-tags"><span className={'pill lv-' + r.level}>{r.level} RISK</span>{(mode === 'demo' || exercise) && <span className="pill sim">{exercise ? 'EXERCISE' : 'SIMULATION'}</span>}</div>
         <div className="vp-kpis">
           <div><span>Flood chance</span><b>{Math.round(r.pMax * 100)}%</b></div>
-          <div><span>Water arrives</span><b>{exercise && townInfo ? (townInfo.arrivalH === null ? 'Not in 24 h' : townInfo.arrivalH === 0 ? 'Now' : `~${townInfo.arrivalH} h`) : r.impactH === null ? 'Not in 48 h' : r.impactH === 0 ? 'Now' : `~${r.impactH} h`}</b></div>
+          <div><span>Water arrives</span><b>{r.impactH === null ? 'Not in 48 h' : r.impactH === 0 ? 'Now' : `~${r.impactH} h`}</b></div>
         </div>
         <div className="vp-action">{r.action}</div>
       </div>
@@ -834,7 +819,7 @@ function VillagePanel({ r, route, run, mode, h, st, setSt, onClose, onOpenIncide
       {route && <RouteShare v={v} r={r} route={route} exercise={exercise} />}
 
       {/* ---- human in the loop ---- */}
-      {(r.level === 'HIGH' || r.level === 'CRITICAL' || r.level === 'MEDIUM') && <div className="approve">
+      {(exercise || r.level === 'HIGH' || r.level === 'CRITICAL' || r.level === 'MEDIUM') && <div className="approve">
          <div className="kicker mt">{demoMode ? 'Simulated operator decision' : 'Operator decision'}</div>
          {demoMode && <p className="note">All steps below are simulated in this browser. No incidents are created, no calls are placed, and no notifications are sent.</p>}
          {stage === 'review' && !review && <div className="aqb"><button className="pri" onClick={() => setReview(true)}><FiPhoneCall /> {demoMode ? 'Review simulated alert' : 'Review and approve alert'}</button></div>}
