@@ -63,6 +63,7 @@ flowchart TD
   I --> J
   J --> K[Stage 1: Sarpanch call and Telegram]
   K -- escalate --> L[Stage 2: urgent call to citizens]
+  K -- escalate --> N[Advisory report PDF to the NDRF bot]
   K -- reject --> M[Closed as false alarm]
 ```
 
@@ -72,12 +73,11 @@ The flow of the site: **Home → Glacier story → Live map → Approve → the 
 
 | | |
 |---|---|
-| <img src="presentation/blog/01-home.jpg" alt="Home" width="420" /><br/>**Home** | <img src="presentation/blog/02-live-india-map.jpg" alt="Live India map" width="420" /><br/>**Live India map**: every river point, rising ones flagged |
-| <img src="presentation/blog/05-simulated-flood-route.jpg" alt="Flood route" width="420" /><br/>**Flood and evacuation route** | <img src="presentation/blog/06-aws-dataflow-3d.jpg" alt="AWS data flow" width="420" /><br/>**AWS data flow (3D)** |
-| <img src="docs/img/flood-zone-polygons.png" alt="Polygons and phones" width="420" /><br/>**Flood trajectory (red), evacuation zone (violet), phones** | <img src="docs/img/live-escalation-escalated.png" alt="Live escalation" width="420" /><br/>**Live escalation: ESCALATED**, with the live log |
-
-<p align="center"><img src="docs/img/live-escalation-rejected.png" alt="Live escalation rejected" width="640" /></p>
-<p align="center"><sub>The same panel when the Sarpanch rejects: "REJECTED: FALSE ALARM". Nobody else is contacted.</sub></p>
+| <img src="docs/img/home.png" alt="Home" width="420" /><br/>**Home** | <img src="docs/img/live-india-map.png" alt="Live India map" width="420" /><br/>**Live map**: India river network, rising points flagged |
+| <img src="docs/img/flood-zone-polygons.png" alt="Polygons and phones" width="420" /><br/>**Flood trajectory (red), evacuation zone (violet), phones** | <img src="docs/img/alerts-queue.png" alt="Alert queue" width="420" /><br/>**Alert queue**: towns ranked by real model risk and arrival time |
+| <img src="docs/img/panel-top.png" alt="Village panel" width="300" /><br/>**Village panel**: risk, impact zone, phones, send distress signal | <img src="docs/img/panel-ndrf.png" alt="NDRF report box" width="300" /><br/>**NDRF report**: generate the PDF or send it to the NDRF bot |
+| <img src="docs/img/live-escalation-escalated.png" alt="Live escalation escalated" width="420" /><br/>**Live escalation: ESCALATED**, with the NDRF step and the live log | <img src="docs/img/live-escalation-rejected.png" alt="Live escalation rejected" width="420" /><br/>**Live escalation: REJECTED**, nobody else is contacted |
+| <img src="docs/img/ndrf-report-page1.png" alt="NDRF report page 1" width="300" /><br/>**NDRF advisory report (PDF), page 1** | <img src="presentation/blog/06-aws-dataflow-3d.jpg" alt="AWS data flow" width="420" /><br/>**AWS data flow (3D)** |
 
 ## Satellite data: Sentinel-1 and Sentinel-2
 
@@ -186,6 +186,7 @@ flowchart LR
   API --> VOICE[Voice provider]
   ESC --> VOICE
   ESC --> TG[Telegram bot]
+  ESC --> NB[NDRF Telegram bot<br/>advisory report PDF]
   MON[River monitor<br/>681 points] --> SNAP[(Snapshot JSON)]
   SNAP --> B
 ```
