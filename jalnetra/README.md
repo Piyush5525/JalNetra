@@ -387,11 +387,12 @@ Sentinel-1 and Sentinel-2 (Microsoft Planetary Computer) · GloFAS river dischar
 
 ## Team Members
 
-| Name | GitHub ID | AWS Builder Center Alias |
+| Name | GitHub | LinkedIn |
 |---|---|---|
-| Piyush Agarwal | [GitHub (Piyush5525)](https://github.com/Piyush5525) | @piyush5525 |
-| Swastik Dutt | [GitHub (Swastikkkkk)](https://github.com/Swastikkkkk) | @devswastik |
-| Veer Jain | [GitHub (vjn6805)](https://github.com/vjn6805) | @vjn6805 |
+| Piyush Agarwal | [Piyush5525](https://github.com/Piyush5525) | [piyush-agarwal](https://www.linkedin.com/in/piyush-agarwal-97b731316/) |
+| Veer Jain | [vjn6805](https://github.com/vjn6805) | [veerjain6805](https://www.linkedin.com/in/veerjain6805) |
+| Kanishk S Das | [kanishk0902](https://github.com/kanishk0902) | [kanishk-d](https://www.linkedin.com/in/kanishk-d-35a68a368/) |
+| Ashita Saxena | [Ashubyte08](https://github.com/Ashubyte08) | [ashita-saxena](https://www.linkedin.com/in/ashita-saxena-a3178824a/) |
 
 ---
 
