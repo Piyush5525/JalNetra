@@ -17,7 +17,8 @@
 ## Contents
 1. [What it does](#what-it-does)
 2. [How it works](#how-it-works)
-3. [Screenshots](#screenshots)
+3. [Architecture, routing and data flow](#architecture-routing-and-data-flow)
+4. [Screenshots](#screenshots)
 4. [Satellite data: Sentinel-1 and Sentinel-2](#satellite-data-sentinel-1-and-sentinel-2)
 5. [The model](#the-model)
 6. [Flood polygons, people and phones](#flood-polygons-people-and-phones)
@@ -69,6 +70,115 @@ flowchart TD
 
 The flow of the site: **Home → Glacier story → Live map → Approve → the phone rings → the Sarpanch decides → the citizens are called.**
 
+## Architecture, routing and data flow
+
+### System architecture
+
+```mermaid
+flowchart TB
+  subgraph SRC[Data sources]
+    OM[Open-Meteo<br/>GloFAS discharge and ERA5 rain]
+    PC[Planetary Computer<br/>Sentinel-1, Sentinel-2, JRC, WorldCover]
+    DEM[Copernicus DEM GLO-30]
+    WP[WorldPop 100 m]
+    OSM[OpenStreetMap, GeoNames]
+  end
+  subgraph CLIENT[Browser: React 19 + Vite]
+    HOME[Home and Glacier story]
+    LIVE[Live map and alert queue]
+    ENG[Engine: forecast, flood cell model, polygons]
+    REP[NDRF report builder PDF]
+    RT[Route and AR]
+  end
+  subgraph BACK[Backend: same handler on AWS Lambda or local]
+    API[API handler]
+    PXY[Cached proxy]
+    MON[River monitor 681 points]
+    ESC[Escalation service]
+    DB[(Postgres ledger)]
+  end
+  subgraph OUT[People]
+    SAR[Sarpanch phone and Telegram]
+    CIT[Citizen phones]
+    NDRF[NDRF Telegram bot]
+  end
+  OM --> PXY
+  WP --> PXY
+  PC --> LIVE
+  DEM --> ENG
+  OSM --> RT
+  PXY --> LIVE
+  MON --> LIVE
+  LIVE --> ENG --> REP
+  ENG --> RT
+  LIVE -- approve --> API --> DB
+  API --> ESC
+  ESC --> SAR
+  ESC --> CIT
+  ESC --> NDRF
+  REP -. PDF .-> ESC
+```
+
+### Routing
+
+There are three kinds of routing in JalNetra.
+
+**1. Page routing (the site)**
+
+```mermaid
+flowchart LR
+  H[Home] --> G[Glacier story]
+  G --> L[Live map /live]
+  L --> Q[Alert queue]
+  Q --> P[Village panel]
+  P --> R[Evacuation route and AR]
+  P --> E[Live escalation banner]
+```
+
+**2. Evacuation routing.** From the evacuation zone polygon, the engine picks the nearest shelters (schools, colleges, hospitals) that lie outside the flood, ranks them by distance and flood status, and draws the road route to the best one. The same destination is read out in the citizen call and shown as a 3D route and an AR arrow.
+
+```mermaid
+flowchart LR
+  Z[Evacuation zone polygon] --> S[Shelters from OpenStreetMap]
+  S --> F{Inside the flood?}
+  F -- yes --> X[Skip]
+  F -- no --> D[Rank by distance]
+  D --> RT[Road route to the safe place]
+  RT --> M[3D route and AR arrow]
+  RT --> V[Safe place named in the call]
+  RT --> PDF[Route in the NDRF report]
+```
+
+**3. Alert routing (who is told, and when)**
+
+```mermaid
+flowchart TD
+  A[Operator approves alert] --> S1[Stage 1: Sarpanch call and Telegram]
+  S1 --> Q{Sarpanch answer}
+  Q -- escalate --> C[Stage 2: citizens in the zone]
+  Q -- escalate --> N[NDRF Telegram bot gets the advisory PDF]
+  Q -- false alarm --> X[Closed. Nobody else is contacted]
+  Q -- no answer in 20 min --> T[Expired. Nobody else is contacted]
+```
+
+### End-to-end data flow
+
+```mermaid
+flowchart LR
+  A[Rain and river flow] --> B[Hourly forecast per station]
+  B --> C[Flood probability per 200 m cell]
+  SAT[Sentinel-1 flood masks] -. calibrates .-> C
+  C --> D[Flood and evacuation polygons]
+  D --> E[Villages hit and arrival time]
+  D --> F[People and phones from WorldPop]
+  E --> G[Alert queue ranked by risk]
+  F --> G
+  G --> H[Human review and approval]
+  H --> I[Sarpanch decision]
+  I --> J[Citizen call and NDRF report]
+  J --> K[Live status on the site]
+```
+
 ## Screenshots
 
 | | |
@@ -77,7 +187,9 @@ The flow of the site: **Home → Glacier story → Live map → Approve → the 
 | <img src="jalnetra/docs/img/flood-zone-polygons.png" alt="Polygons and phones" width="420" /><br/>**Flood trajectory (red), evacuation zone (violet), phones** | <img src="jalnetra/docs/img/alerts-queue.png" alt="Alert queue" width="420" /><br/>**Alert queue**: towns ranked by real model risk and arrival time |
 | <img src="jalnetra/docs/img/panel-top.png" alt="Village panel" width="300" /><br/>**Village panel**: risk, impact zone, phones, send distress signal | <img src="jalnetra/docs/img/panel-ndrf.png" alt="NDRF report box" width="300" /><br/>**NDRF report**: generate the PDF or send it to the NDRF bot |
 | <img src="jalnetra/docs/img/live-escalation-escalated.png" alt="Live escalation escalated" width="420" /><br/>**Live escalation: ESCALATED**, with the NDRF step and the live log | <img src="jalnetra/docs/img/live-escalation-rejected.png" alt="Live escalation rejected" width="420" /><br/>**Live escalation: REJECTED**, nobody else is contacted |
-| <img src="jalnetra/docs/img/ndrf-report-page1.png" alt="NDRF report page 1" width="300" /><br/>**NDRF advisory report (PDF), page 1** | <img src="jalnetra/presentation/blog/06-aws-dataflow-3d.jpg" alt="AWS data flow" width="420" /><br/>**AWS data flow (3D)** |
+| <img src="jalnetra/docs/img/ndrf-report-page1.png" alt="NDRF report page 1" width="300" /><br/>**NDRF advisory report (PDF), page 1** | <img src="jalnetra/presentation/blog/05-simulated-flood-route.jpg" alt="Simulated flood route" width="420" /><br/>**Simulated flood route** down the Gandak |
+| <img src="jalnetra/presentation/blog/03-glacier-story-india-entry.jpg" alt="Glacier story, flood enters India" width="420" /><br/>**Glacier story**: the flood enters India | <img src="jalnetra/presentation/blog/04-glacier-story-gauges.jpg" alt="Glacier story gauges" width="420" /><br/>**Glacier story**: what the gauges saw |
+| <img src="jalnetra/presentation/blog/06-aws-dataflow-3d.jpg" alt="AWS data flow" width="420" /><br/>**AWS data flow (3D)** | <img src="jalnetra/presentation/blog/07-aws-dataflow-voice.jpg" alt="Voice alert data flow" width="420" /><br/>**Voice alert data flow** |
 
 ## Satellite data: Sentinel-1 and Sentinel-2
 
