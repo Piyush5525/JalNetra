@@ -1,0 +1,9 @@
+local backend on http://127.0.0.1:8787; sarpanch phone ends 4318, citizen phone ends 3139
+JalNetra demo exercise call { alert: 'cb53b474-d21c-4cea-9d71-e7b89588aa3b', status: 'dispatched' }
+06:37:54 monitor: 681/681 points · 6 rivers rising to flood levels · N632 R35 W2 D12 · 0 failed
+JalNetra demo exercise call { alert: 'df572c15-e2f4-47f3-b53c-f4aa91ad8f95', status: 'dispatched' }
+JalNetra demo exercise call { alert: 'd4dd4014-fb0e-40c8-8234-3e06732d2905', status: 'dispatched' }
+09:39:34 monitor: 681/681 points · 6 rivers rising to flood levels · N632 R35 W2 D12 · 0 failed
+12:41:30 monitor: batch failed 450 The operation was aborted due to timeout
+12:42:01 monitor: retrying 90 missing points (attempt 1)
+12:42:25 monitor: 681/681 points · 9 rivers rising to flood levels · N639 R21 W9 D12 · 0 failed

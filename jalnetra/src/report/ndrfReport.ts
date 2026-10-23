@@ -2,7 +2,7 @@ import { jsPDF } from 'jspdf'
 
 /**
  * NDRF flood advisory report (PDF), built in the browser from the same model output the map shows.
- * Nothing here is invented: every number is passed in by the caller. The rescue-resource figures are a planning
+ * No placeholder data: every number is passed in by the caller, and a missing measurement is shown as n/a. The rescue-resource figures are a planning
  * estimate from the stated assumptions and are labelled as such in the document.
  */
 
@@ -23,8 +23,8 @@ export const REPORT_ASSUMPTIONS = {
 } as const
 
 export type ReportHorizon = { h: number; floodKm2: number; evacKm2: number; people: number | null; phones: number | null }
-export type ReportShelter = { name: string; kind: string; km: number; dry: boolean }
-export type ReportVillage = { name: string; level: string; probPct: number; arrivalH: number | null }
+export type ReportShelter = { lat: number; lng: number; name: string; kind: string; km: number; dry: boolean }
+export type ReportVillage = { name: string; lat: number; lng: number; level: string; probPct: number; arrivalH: number | null }
 export type NdrfInput = {
   generatedAt: Date
   source: 'replay' | 'live'
@@ -35,9 +35,10 @@ export type NdrfInput = {
   selectedHorizon: number
   horizons: ReportHorizon[]
   population: { people: number | null; floodPeople: number | null; phones: number | null; source: string; phonesPerPerson: number }
-  route: { shelter: string; km: number; roadKm: number; ok: boolean; carMin: number | null; walkMin: number | null } | null
+  route: { shelter: string; shelterLat: number; shelterLng: number; km: number; roadKm: number; ok: boolean; carMin: number | null; walkMin: number | null } | null
   shelters: ReportShelter[]
   villages: ReportVillage[]
+  zoneBox: { w: number; e: number; s: number; n: number } | null
   escalation: { status: string; via: string | null } | null
   mapPng: string | null
 }
@@ -67,50 +68,87 @@ export function estimateResources(people: number | null, floodPeople: number | n
   return { rescue, boats, teams, personnel: teams * A.personnelPerTeam, camps, shelterPeople: Math.round(people * A.shareNeedingCamp), medical: Math.max(1, Math.ceil(people / A.peoplePerMedicalTeam)) }
 }
 
+type RGB = [number, number, number]
+type Cell = string | { t: string; url: string }
+const BLUE: RGB = [29, 78, 216]
+const PALE: RGB = [240, 246, 243]
+const AMBER: RGB = [194, 120, 3]
+const mapsPin = (lat: number, lng: number) => `https://www.google.com/maps/search/?api=1&query=${lat.toFixed(6)},${lng.toFixed(6)}`
+const mapsDir = (a: [number, number], b: [number, number], mode: 'driving' | 'walking' = 'driving') =>
+  `https://www.google.com/maps/dir/?api=1&origin=${a[0].toFixed(6)},${a[1].toFixed(6)}&destination=${b[0].toFixed(6)},${b[1].toFixed(6)}&travelmode=${mode}`
+
 export function buildNdrfPdfBytes(input: NdrfInput): { bytes: ArrayBuffer; filename: string } {
   const doc = new jsPDF({ unit: 'mm', format: 'a4' })
   const W = 210, M = 14, CW = W - 2 * M
   let y = 0
   let page = 1
+  let secNo = 0
   const id = `JN-${t(input.village.name).replace(/\W+/g, '').toUpperCase().slice(0, 8)}-${input.generatedAt.toISOString().slice(0, 16).replace(/\D/g, '')}`
+  const vPos: [number, number] = [input.village.lat, input.village.lng]
+  const villageUrl = mapsPin(...vPos)
+  const zone = input.zoneBox
+  const zoneCentre: [number, number] | null = zone ? [(zone.s + zone.n) / 2, (zone.w + zone.e) / 2] : null
 
   const footer = () => {
-    doc.setDrawColor(...LINE); doc.line(M, 285, W - M, 285)
-    doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(...MUTE)
-    doc.text(t(`JalNetra flood advisory ${id}  |  Model ${input.modelVersion}  |  Planning aid prepared by an automated forecast; confirm on the ground.`), M, 290)
-    doc.text(`Page ${page}`, W - M, 290, { align: 'right' })
+    doc.setFillColor(...GREEN); doc.rect(0, 291, W, 6, 'F')
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(255, 255, 255)
+    doc.text(t(`JalNetra flood advisory ${id}  |  Model ${input.modelVersion}  |  Automated forecast: confirm on the ground`), M, 294.8)
+    doc.text(`Page ${page}`, W - M, 294.8, { align: 'right' })
   }
   const newPage = () => { footer(); doc.addPage(); page++; y = 18 }
-  const need = (h: number) => { if (y + h > 280) newPage() }
+  const need = (h: number) => { if (y + h > 284) newPage() }
   const heading = (s: string) => {
-    need(14)
-    doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.setTextColor(...GREEN)
-    doc.text(t(s), M, y); y += 1.8
-    doc.setDrawColor(...GREEN); doc.setLineWidth(0.5); doc.line(M, y, M + 22, y); doc.setLineWidth(0.2)
-    y += 5.5
+    y += 4; need(16); secNo++
+    doc.setFillColor(...GREEN); doc.circle(M + 3.4, y - 1.4, 3.4, 'F')
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(255, 255, 255)
+    doc.text(String(secNo), M + 3.4, y - 0.1, { align: 'center' })
+    doc.setFontSize(12.5); doc.setTextColor(...GREEN)
+    doc.text(t(s), M + 9.5, y)
+    y += 2.2
+    doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.line(M, y, W - M, y)
+    y += 6
   }
-  const para = (s: string, size = 9.5, color: [number, number, number] = INK, bold = false) => {
+  const para = (s: string, size = 9.5, color: RGB = INK, bold = false) => {
     doc.setFont('helvetica', bold ? 'bold' : 'normal'); doc.setFontSize(size); doc.setTextColor(...color)
     const lines = doc.splitTextToSize(t(s), CW) as string[]
     for (const l of lines) { need(5); doc.text(l, M, y); y += size * 0.5 }
     y += 1.5
   }
-  const kv = (rows: [string, string][], colW = 46) => {
+  const link = (label: string, x: number, yy: number, url: string, size = 8.5, align: 'left' | 'right' = 'left') => {
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(size); doc.setTextColor(...BLUE)
+    const w = doc.getTextWidth(label), x0 = align === 'right' ? x - w : x
+    doc.text(label, x0, yy)
+    doc.setDrawColor(...BLUE); doc.setLineWidth(0.2); doc.line(x0, yy + 0.7, x0 + w, yy + 0.7)
+    doc.link(x0, yy - size * 0.38, w, size * 0.5, { url })
+  }
+  /** Pill-shaped button that opens a Google Maps link. */
+  const button = (label: string, x: number, yy: number, url: string) => {
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5)
+    const w = doc.getTextWidth(label) + 9
+    doc.setFillColor(...BLUE); doc.roundedRect(x, yy, w, 7.6, 3.8, 3.8, 'F')
+    doc.setTextColor(255, 255, 255); doc.text(label, x + 4.5, yy + 5)
+    doc.link(x, yy, w, 7.6, { url })
+    return w
+  }
+  const kv = (rows: [string, Cell][], colW = 46) => {
     doc.setFontSize(9.5)
     for (const [k, v] of rows) {
-      const lines = doc.splitTextToSize(t(v), CW - colW) as string[]
-      need(lines.length * 4.6 + 1)
-      doc.setFont('helvetica', 'normal'); doc.setTextColor(...MUTE); doc.text(t(k), M, y)
-      doc.setFont('helvetica', 'bold'); doc.setTextColor(...INK)
+      const txt = typeof v === 'string' ? v : v.t
+      const lines = doc.splitTextToSize(t(txt), CW - colW - 4) as string[]
+      need(lines.length * 4.6 + 2)
+      doc.setFillColor(...PALE); doc.rect(M, y - 4.2, colW - 2, lines.length * 4.6 + 1.2, 'F')
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...MUTE); doc.text(t(k), M + 2, y)
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(...INK)
       lines.forEach((l, i) => doc.text(l, M + colW, y + i * 4.6))
-      y += lines.length * 4.6 + 1
+      if (typeof v !== 'string') link(lines[0], M + colW, y, v.url, 9.5)
+      y += lines.length * 4.6 + 1.6
     }
     y += 2
   }
-  const table = (head: string[], rows: string[][], widths: number[], align: ('l' | 'r')[] = []) => {
-    const rowH = 6.2
+  const table = (head: string[], rows: Cell[][], widths: number[], align: ('l' | 'r')[] = []) => {
+    const rowH = 6.6
     const drawHead = () => {
-      doc.setFillColor(...GREEN); doc.rect(M, y - 4.4, CW, rowH, 'F')
+      doc.setFillColor(...GREEN); doc.roundedRect(M, y - 4.6, CW, rowH, 1, 1, 'F')
       doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); doc.setTextColor(255, 255, 255)
       let x = M
       head.forEach((h, i) => { doc.text(t(h), align[i] === 'r' ? x + widths[i] - 2 : x + 2, y, { align: align[i] === 'r' ? 'right' : 'left' }); x += widths[i] })
@@ -118,92 +156,137 @@ export function buildNdrfPdfBytes(input: NdrfInput): { bytes: ArrayBuffer; filen
     }
     need(rowH * 3); drawHead()
     rows.forEach((r, ri) => {
-      if (y + rowH > 280) { newPage(); drawHead() }
-      if (ri % 2 === 0) { doc.setFillColor(244, 247, 250); doc.rect(M, y - 4.4, CW, rowH, 'F') }
+      if (y + rowH > 284) { newPage(); drawHead() }
+      if (ri % 2 === 0) { doc.setFillColor(244, 248, 246); doc.rect(M, y - 4.6, CW, rowH, 'F') }
       doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...INK)
       let x = M
       r.forEach((c, i) => {
-        const s = doc.splitTextToSize(t(c), widths[i] - 4)[0] as string
-        doc.text(s ?? '', align[i] === 'r' ? x + widths[i] - 2 : x + 2, y, { align: align[i] === 'r' ? 'right' : 'left' }); x += widths[i]
+        const raw = typeof c === 'string' ? c : c.t
+        const s = (doc.splitTextToSize(t(raw), widths[i] - 4)[0] as string) ?? ''
+        const right = align[i] === 'r'
+        if (typeof c !== 'string') link(s, right ? x + widths[i] - 2 : x + 2, y, c.url, 8.5, right ? 'right' : 'left')
+        else doc.text(s, right ? x + widths[i] - 2 : x + 2, y, { align: right ? 'right' : 'left' })
+        x += widths[i]
       })
       y += rowH
     })
+    doc.setDrawColor(...LINE); doc.setLineWidth(0.2); doc.line(M, y - 4.6, W - M, y - 4.6)
     y += 3
   }
 
   // ---- title band
-  doc.setFillColor(...GREEN); doc.rect(0, 0, W, 34, 'F')
-  doc.setTextColor(255, 255, 255); doc.setFont('helvetica', 'bold'); doc.setFontSize(19)
-  doc.text('FLOOD ADVISORY REPORT', M, 15)
+  doc.setFillColor(...GREEN); doc.rect(0, 0, W, 38, 'F')
+  doc.setFillColor(...RED); doc.rect(0, 38, W, 1.6, 'F')
+  doc.setTextColor(255, 255, 255); doc.setFont('helvetica', 'bold'); doc.setFontSize(21)
+  doc.text('FLOOD ADVISORY REPORT', M, 16)
   doc.setFont('helvetica', 'normal'); doc.setFontSize(10)
-  doc.text('Prepared for the National Disaster Response Force (NDRF) and the District Disaster Management Authority', M, 22)
-  doc.setFontSize(8.5)
-  doc.text(t(`Report ${id}  |  Generated ${ist(input.generatedAt)}  |  Source: JalNetra flood intelligence`), M, 28.5)
-  y = 44
+  doc.text('For the National Disaster Response Force (NDRF) and the District Disaster Management Authority', M, 23.5)
+  doc.setFontSize(8.5); doc.setTextColor(190, 225, 210)
+  doc.text(t(`Report ${id}   |   Generated ${ist(input.generatedAt)}   |   JalNetra flood intelligence`), M, 31)
+  y = 52
 
-  // ---- situation summary
-  const lvlColor = input.risk.level === 'CRITICAL' ? RED : input.risk.level === 'HIGH' ? ([194, 120, 3] as [number, number, number]) : GREEN
-  doc.setDrawColor(...lvlColor); doc.setLineWidth(0.8); doc.roundedRect(M, y - 4, CW, 30, 2, 2); doc.setLineWidth(0.2)
-  doc.setFont('helvetica', 'bold'); doc.setFontSize(15); doc.setTextColor(...INK)
-  doc.text(t(`${input.village.name}${input.village.district ? ', ' + input.village.district : ''}`), M + 4, y + 3)
-  doc.setFontSize(11); doc.setTextColor(...lvlColor)
-  doc.text(`${input.risk.level} RISK`, W - M - 4, y + 3, { align: 'right' })
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...INK)
-  const arrive = input.risk.arrivalH === null ? 'not within 24 h' : input.risk.arrivalH === 0 ? 'already at the village' : `about ${input.risk.arrivalH} h`
-  doc.text(t(`Flood probability ${input.risk.probPct}%  |  Water reaches the village: ${arrive}  |  Confidence: ${input.risk.conf}`), M + 4, y + 11)
-  doc.text(t(`Coordinates ${input.village.lat.toFixed(4)} N, ${input.village.lng.toFixed(4)} E  |  Recommended action: ${input.risk.action}`), M + 4, y + 17)
+  // ---- situation card
+  const lvlColor: RGB = input.risk.level === 'CRITICAL' ? RED : input.risk.level === 'HIGH' ? AMBER : GREEN
+  doc.setFillColor(...PALE); doc.roundedRect(M, y - 6, CW, 50, 2.5, 2.5, 'F')
+  doc.setFillColor(...lvlColor); doc.roundedRect(M, y - 6, 3, 50, 1.5, 1.5, 'F')
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...INK)
+  doc.text(t(`${input.village.name}${input.village.district ? ', ' + input.village.district : ''}`), M + 8, y + 2)
+  const badge = `${input.risk.level} RISK`
+  doc.setFontSize(10); const bw = doc.getTextWidth(badge) + 9
+  doc.setFillColor(...lvlColor); doc.roundedRect(W - M - 4 - bw, y - 4, bw, 8, 4, 4, 'F')
+  doc.setTextColor(255, 255, 255); doc.text(badge, W - M - 4 - bw / 2, y + 1.4, { align: 'center' })
+  const arrive = input.risk.arrivalH === null ? 'Not within 24 h' : input.risk.arrivalH === 0 ? 'At the village now' : `About ${input.risk.arrivalH} h`
+  const zonePeople = input.population.people
+  const tiles: [string, string][] = [['Flood probability', `${input.risk.probPct}%`], ['Water reaches village', arrive], ['Model confidence', t(input.risk.conf)], ['People in evac. zone', zonePeople === null ? 'n/a' : `~${n0(zonePeople)}`]]
+  const tw = (CW - 16 - 9) / 4
+  tiles.forEach(([k, v], i) => {
+    const x = M + 8 + i * (tw + 3)
+    doc.setFillColor(255, 255, 255); doc.roundedRect(x, y + 7, tw, 17, 2, 2, 'F')
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(...MUTE); doc.text(k, x + 3, y + 12.5)
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(v.length > 14 ? 9.5 : 12.5); doc.setTextColor(...INK); doc.text(v, x + 3, y + 20)
+  })
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...lvlColor)
+  const act = doc.splitTextToSize(t(`Recommended action: ${input.risk.action}`), CW - 16) as string[]
+  doc.text(act.slice(0, 2), M + 8, y + 30)
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...MUTE)
   const base = input.source === 'live' ? 'Live forecast (GloFAS river model + Open-Meteo rain + terrain)' : `Replay of the September 2026 Gandak flood${input.dataClock ? ' at ' + ist(input.dataClock) : ''}`
-  doc.setTextColor(...MUTE); doc.setFontSize(8.5)
-  doc.text(t(`Data basis: ${base}`), M + 4, y + 23)
-  y += 36
+  doc.text(t(`Data basis: ${base}`), M + 8, y + 38)
+  y += 58
+
+  // ---- location links
+  heading('Affected location (Google Maps)')
+  kv([
+    ['Village', `${input.village.name}${input.village.district ? ', ' + input.village.district : ''}`],
+    ['Coordinates', `${input.village.lat.toFixed(5)} N, ${input.village.lng.toFixed(5)} E`],
+  ])
+  need(24)
+  let bx = M
+  bx += button('Open village in Google Maps', bx, y - 3, villageUrl) + 3
+  if (zoneCentre) bx += button('Open flood-zone centre', bx, y - 3, mapsPin(...zoneCentre)) + 3
+  if (input.route) button('Directions to shelter', bx, y - 3, mapsDir(vPos, [input.route.shelterLat, input.route.shelterLng]))
+  y += 9
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(...MUTE)
+  doc.text(t(`Village: ${villageUrl}`), M, y); y += 4
+  if (zoneCentre) { doc.text(t(`Flood-zone centre: ${mapsPin(...zoneCentre)}`), M, y); y += 4 }
+  y += 4
 
   // ---- forecast table
-  heading('1. Flood forecast and affected area')
+  heading('Flood forecast and affected area')
   para(`Selected planning horizon: ${hz(input.selectedHorizon)}. The flood trajectory is the extra land the river covers beyond its normal channel; the evacuation zone is the region to keep empty (the flood now and at the next forecast step, with a safety margin).`, 9, MUTE)
-  table(['Time', 'Flood trajectory (km2)', 'Evacuation zone (km2)', 'People in zone', 'Phones in zone'],
-    input.horizons.map(r => [hz(r.h) + (r.h === input.selectedHorizon ? '  (selected)' : ''), r.floodKm2.toLocaleString('en-IN'), r.evacKm2.toLocaleString('en-IN'), n0(r.people), n0(r.phones)]),
-    [38, 38, 38, 34, 34], ['l', 'r', 'r', 'r', 'r'])
-  para(`People: ${input.population.source}. Phones = people x ${input.population.phonesPerPerson} (assumption). For horizons other than the selected one, people are scaled from the selected zone's density.`, 8.5, MUTE)
+  table(['Time', 'Flood trajectory (km2)', 'Evacuation zone (km2)', 'People in zone'],
+    input.horizons.map(r => [hz(r.h) + (r.h === input.selectedHorizon ? '  (selected)' : ''), r.floodKm2.toLocaleString('en-IN'), r.evacKm2.toLocaleString('en-IN'), n0(r.people)]),
+    [48, 44, 44, 46], ['l', 'r', 'r', 'r'])
+  para(`People: ${input.population.source}. For horizons other than the selected one, people are scaled from the selected zone's density.`, 8.5, MUTE)
 
   // ---- map
   if (input.mapPng) {
-    need(98)
-    heading('2. Map of the affected area')
+    need(106)
+    heading('Map of the affected area')
+    doc.setDrawColor(...LINE); doc.setLineWidth(0.4); doc.roundedRect(M - 0.5, y - 0.5, CW + 1, 85, 1.5, 1.5)
     doc.addImage(input.mapPng, 'JPEG', M, y, CW, 84)
-    y += 87
-    para('Red: flood trajectory. Violet: evacuation zone. Green markers: shelters outside the predicted flood. Orange markers: shelters inside it. Blue star: the village.', 8.5, MUTE)
+    y += 88
+    const keys: [RGB, string][] = [[RED, 'Flood trajectory'], [[109, 40, 217], 'Evacuation zone'], [[22, 163, 74], 'Shelter, outside flood'], [[245, 158, 11], 'Shelter, inside flood'], [BLUE, 'Village']]
+    let kx = M
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8)
+    for (const [c, lab] of keys) { doc.setFillColor(...c); doc.circle(kx + 1.6, y - 1, 1.6, 'F'); doc.setTextColor(...INK); doc.text(lab, kx + 5, y); kx += 6 + doc.getTextWidth(lab) + 5 }
+    y += 7
   }
 
   // ---- villages
-  heading(`${input.mapPng ? '3' : '2'}. Affected villages inside the evacuation zone (${input.villages.length})`)
+  heading(`Affected villages inside the evacuation zone (${input.villages.length})`)
   if (input.villages.length) {
-    table(['Village', 'Risk level', 'Flood probability', 'Water arrives'],
-      input.villages.slice(0, 30).map(v => [v.name, v.level, `${v.probPct}%`, v.arrivalH === null ? 'not in 48 h' : v.arrivalH === 0 ? 'now' : `~${v.arrivalH} h`]),
-      [78, 34, 36, 34], ['l', 'l', 'r', 'r'])
+    table(['Village', 'Risk level', 'Flood prob.', 'Water arrives', 'Location'],
+      input.villages.slice(0, 30).map(v => [v.name, v.level, `${v.probPct}%`, v.arrivalH === null ? 'not in 48 h' : v.arrivalH === 0 ? 'now' : `~${v.arrivalH} h`, { t: 'Google Maps', url: mapsPin(v.lat, v.lng) }]),
+      [62, 28, 26, 32, 34], ['l', 'l', 'r', 'r', 'l'])
     if (input.villages.length > 30) para(`${input.villages.length - 30} more villages not listed.`, 8.5, MUTE)
   } else para('No other tracked village lies inside the zone at this horizon.')
 
   // ---- shelters
-  heading(`${input.mapPng ? '4' : '3'}. Nearest shelters`)
-  table(['Shelter', 'Type', 'Distance', 'Flood status (+24 h)'],
-    input.shelters.map(s => [s.name || 'Unnamed', s.kind, `${s.km.toFixed(1)} km`, s.dry ? 'Outside predicted flood' : 'Inside predicted flood']),
-    [78, 32, 26, 46], ['l', 'l', 'r', 'l'])
+  heading('Nearest shelters')
+  table(['Shelter', 'Type', 'Distance', 'Flood status (+24 h)', 'Location'],
+    input.shelters.map(s => [s.name || 'Unnamed', s.kind, `${s.km.toFixed(1)} km`, s.dry ? 'Outside predicted flood' : 'Inside predicted flood', { t: 'Google Maps', url: mapsPin(s.lat, s.lng) }]),
+    [58, 22, 22, 46, 34], ['l', 'l', 'r', 'l', 'l'])
   para('Shelters are the nearest mapped schools, colleges and hospitals (OpenStreetMap). They are not confirmed relief camps; capacity and access must be verified.', 8.5, MUTE)
 
   // ---- route
-  heading(`${input.mapPng ? '5' : '4'}. Evacuation route`)
+  heading('Evacuation route')
   if (input.route) {
+    const dest: [number, number] = [input.route.shelterLat, input.route.shelterLng]
     kv([
-      ['Destination', input.route.shelter],
+      ['Destination', { t: input.route.shelter, url: mapsPin(...dest) }],
       ['Distance', `${input.route.km.toFixed(1)} km (${input.route.roadKm.toFixed(1)} km on mapped roads)`],
       ['Travel time', `${input.route.carMin ?? 'n/a'} min by car, ${input.route.walkMin ?? 'n/a'} min on foot`],
       ['Flood exposure', input.route.ok ? 'Route avoids predicted flood water' : 'No fully dry route: least-exposed route, leave before the water arrives'],
     ])
+    need(12)
+    const w1 = button('Driving directions', M, y - 3, mapsDir(vPos, dest))
+    button('Walking directions', M + w1 + 3, y - 3, mapsDir(vPos, dest, 'walking'))
+    y += 10
   } else para('No dry school or hospital was found within 30 km without crossing the river.')
 
   // ---- resources
   const est = estimateResources(input.population.people, input.population.floodPeople)
-  heading(`${input.mapPng ? '6' : '5'}. Estimated rescue and relief requirement (planning estimate)`)
+  heading('Estimated rescue and relief requirement (planning estimate)')
   if (est) {
     const A = REPORT_ASSUMPTIONS
     kv([
@@ -216,28 +299,28 @@ export function buildNdrfPdfBytes(input: NdrfInput): { bytes: ArrayBuffer; filen
       ['Medical teams', `${est.medical}  (1 per ${n0(A.peoplePerMedicalTeam)} people)`],
     ], 52)
     para('These figures follow from the assumptions in brackets and are a starting point for the response commander, not a deployment order.', 8.5, MUTE)
-  } else para('Population in the zone is not available, so no estimate is given.')
+  } else para('Measured population for the zone is not available, so no resource estimate is given.')
 
-  // ---- alert status
-  heading(`${input.mapPng ? '7' : '6'}. Local alert status`)
+  // ---- alert status (only when a real decision exists)
   if (input.escalation) {
+    heading('Local alert status')
     const s = input.escalation.status
     kv([['Village head (Sarpanch)', s === 'awaiting_sarpanch' ? 'Called, waiting for a decision' : s === 'rejected' ? 'Rejected as a false alarm' : s === 'expired' ? 'No decision in time' : 'Confirmed the alert'],
       ['Decision channel', input.escalation.via ?? 'n/a'],
       ['Citizens in the zone', s === 'escalated' || s === 'escalating' ? 'Alert call placed' : 'Not called']])
-  } else para('No alert has been approved for this village yet.')
+  }
 
   // ---- risk factors
-  heading(`${input.mapPng ? '8' : '7'}. Why this village is at risk`)
+  heading('Why this village is at risk')
   table(['Factor', 'Detail', 'Points'],
     input.risk.factors.map(f => [f.label, f.detail, `${Math.round(f.pts)}/${f.max}`]),
     [44, 106, 32], ['l', 'l', 'r'])
   para(`Risk score ${input.risk.score} of ${input.risk.factors.reduce((a, f) => a + f.max, 0)}.`, 9)
 
   // ---- method
-  heading(`${input.mapPng ? '9' : '8'}. Method, data and limits`)
+  heading('Method, data and limits')
   para('River discharge forecast (GloFAS via Open-Meteo, 7 Gandak stations) is turned into a flood probability per 200 m cell with a model fitted to Sentinel-1 radar flood maps (height above channel from Copernicus DEM, JRC normal water). Only water connected to the river is kept. Population comes from WorldPop (100 m).', 8.8)
-  para('Limits: the model says whether water reaches a place, not how deep. Embankments and canals are not modelled. Cells are about 200 m. It was fitted to one event (September 2026). Phone counts are estimates, not device locations. Use alongside gauge readings and local reports.', 8.8)
+  para('Limits: the model says whether water reaches a place, not how deep. Embankments and canals are not modelled. Cells are about 200 m. It was fitted to one event (September 2026). Use alongside gauge readings and local reports.', 8.8)
 
   footer()
   const bytes = doc.output('arraybuffer')

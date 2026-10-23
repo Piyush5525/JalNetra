@@ -355,32 +355,35 @@ export default function Live({ mode, onHome, onValidate, onOpenIncident }: { mod
   const collectNdrf = async (esc: { status: string; via: string | null } | null): Promise<NdrfInput> => {
     if (!spread || !terrain || !selTown || !zone || !evac || !selR) throw new Error('Open a town first.')
     const v = selTown
-    const selPeople = popNow?.total ?? Math.round(evac.areaKm2 * FALLBACK_DENSITY_PER_KM2)
-    const dens = evac.areaKm2 > 0 ? selPeople / evac.areaKm2 : FALLBACK_DENSITY_PER_KM2
+    // Only measured WorldPop counts go in the report: no density guess is substituted.
+    const selPeople = popNow?.source === 'worldpop' && popNow.total != null ? popNow.total : null
+    const dens = selPeople !== null && evac.areaKm2 > 0 ? selPeople / evac.areaKm2 : null
     const horizons = HORIZONS.map(hh => {
       const f = townZone(spread, terrain, v, hh), e = townZone(spread, terrain, v, hh, 'evac')
-      const people = hh === h ? selPeople : Math.round(e.areaKm2 * dens)
-      return { h: hh, floodKm2: f.areaKm2, evacKm2: e.areaKm2, people, phones: Math.round(people * PHONES_PER_PERSON) }
+      const people = selPeople === null || dens === null ? null : hh === h ? selPeople : Math.round(e.areaKm2 * dens)
+      return { h: hh, floodKm2: f.areaKm2, evacKm2: e.areaKm2, people, phones: null }
     })
     const evac24 = townZone(spread, terrain, v, 24, 'evac')
     const shelters = M.pois.map(p => ({ p: [p.x, p.y] as [number, number], name: p.n, kind: KIND[p.a] ?? 'Shelter', km: km([v.lng, v.lat], [p.x, p.y]), dry: !evac24.contains(p.x, p.y) }))
       .sort((a, b) => a.km - b.km).slice(0, 8)
     const villages = VILLAGES.filter(x => x.id !== v.id && evac.contains(x.lng, x.lat)).map(x => {
       const rk = spreadRun.villages.find(q => q.id === x.id)
-      return { name: x.name, level: rk?.level ?? 'LOW', probPct: Math.round((rk?.pAt[h] ?? 0) * 100), arrivalH: rk?.impactH ?? null }
+      return { name: x.name, lat: x.lat, lng: x.lng, level: rk?.level ?? 'LOW', probPct: Math.round((rk?.pAt[h] ?? 0) * 100), arrivalH: rk?.impactH ?? null }
     }).sort((a, b) => b.probPct - a.probPct)
     const rt = routes.get(v.id) ?? null
     const mapPng = renderReportMap({ village: [v.lng, v.lat], flood: zone.polygons, evac: evac.polygons, shelters: shelters.map(s => ({ p: s.p, dry: s.dry, name: s.name })) })
+    const ring = evac.polygons.flatMap(pg => pg[0] ?? [])
+    const zoneBox = ring.length ? { w: Math.min(...ring.map(q => q[0])), e: Math.max(...ring.map(q => q[0])), s: Math.min(...ring.map(q => q[1])), n: Math.max(...ring.map(q => q[1])) } : null
     return ({
       generatedAt: new Date(), source: spreadSource === 'live' && liveOk ? 'live' : 'replay', dataClock: spreadSource === 'live' && liveOk ? null : new Date(Date.parse(SPREAD_CLOCK)),
       modelVersion: M.version,
       village: { name: v.name, district: v.district, lat: v.lat, lng: v.lng },
       risk: { level: selR.level, probPct: Math.round(selR.pMax * 100), score: selR.score, conf: selR.conf, action: selR.action, arrivalH: spread.arrival.get(v.id) ?? selR.impactH, factors: selR.factors.map(f => ({ label: f.label, detail: f.detail, pts: f.pts, max: f.max })) },
       selectedHorizon: h, horizons,
-      population: { people: selPeople, floodPeople: Math.round(zone.areaKm2 * dens), phones: Math.round(selPeople * PHONES_PER_PERSON), source: popNow?.source === 'worldpop' ? 'WorldPop 2020 (live API)' : `density estimate, ${FALLBACK_DENSITY_PER_KM2} people per km2`, phonesPerPerson: PHONES_PER_PERSON },
-      route: rt ? { shelter: rt.shelter.n, km: rt.km, roadKm: rt.roadKm, ok: rt.ok, carMin: real.drive?.minutes ?? null, walkMin: real.walk?.minutes ?? null } : null,
-      shelters: shelters.map(s => ({ name: s.name, kind: s.kind, km: s.km, dry: s.dry })),
-      villages, escalation: esc, mapPng,
+      population: { people: selPeople, floodPeople: dens === null ? null : Math.round(zone.areaKm2 * dens), phones: null, source: selPeople !== null ? 'WorldPop 2020 (100 m grid)' : 'WorldPop count not available for this zone', phonesPerPerson: PHONES_PER_PERSON },
+      route: rt ? { shelter: rt.shelter.n, shelterLat: rt.shelter.y, shelterLng: rt.shelter.x, km: rt.km, roadKm: rt.roadKm, ok: rt.ok, carMin: real.drive?.minutes ?? null, walkMin: real.walk?.minutes ?? null } : null,
+      shelters: shelters.map(s => ({ lat: s.p[1], lng: s.p[0], name: s.name, kind: s.kind, km: s.km, dry: s.dry })),
+      villages, zoneBox, escalation: esc, mapPng,
     })
   }
   const buildNdrf = async (esc: { status: string; via: string | null } | null) => buildNdrfReport(await collectNdrf(esc))
